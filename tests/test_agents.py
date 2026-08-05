@@ -1,6 +1,6 @@
 import numpy as np
 
-from hw_validation_sim.agents import HillClimbAgent, QLearningAgent, run_episode
+from hw_validation_sim.agents import HillClimbAgent, QLearningAgent, run_episode, run_episode_metrics
 from hw_validation_sim.env import CalibrationEnv
 
 
@@ -37,3 +37,15 @@ def test_run_episode_returns_a_float_and_env_is_reset_internally():
     best = run_episode(env, agent, learn=True)
     assert isinstance(best, float)
     assert 0.0 <= best <= 1.0
+
+
+def test_run_episode_metrics_include_effort_and_threshold():
+    env = CalibrationEnv(levels=20, max_steps=20, unit_variation=0.0, seed=0)
+    agent = QLearningAgent(levels=20, rng=np.random.default_rng(0), epsilon=0.0)
+
+    metrics = run_episode_metrics(env, agent, learn=False, threshold_fraction=0.1)
+
+    assert 0.0 <= metrics.best_true_reward <= 1.0
+    assert metrics.steps_to_threshold is not None
+    assert metrics.control_effort <= 20
+    assert metrics.boundary_hits >= 0

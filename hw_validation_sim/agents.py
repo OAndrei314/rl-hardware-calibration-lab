@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .env import ACTIONS, CalibrationEnv
@@ -95,18 +97,56 @@ class QLearningAgent:
         self.training = False
 
 
+@dataclass(frozen=True)
+class EpisodeMetrics:
+    best_true_reward: float
+    steps_to_threshold: int | None
+    control_effort: int
+    boundary_hits: int
+
+
 def run_episode(env: CalibrationEnv, agent, learn: bool = True) -> float:
     """Runs one episode, returns the best TRUE reward observed (agent only sees noisy
     rewards during the episode -- `true_reward` here is for evaluation/reporting only)."""
+    return run_episode_metrics(env, agent, learn=learn).best_true_reward
+
+
+def run_episode_metrics(
+    env: CalibrationEnv,
+    agent,
+    learn: bool = True,
+    threshold_fraction: float = 0.85,
+) -> EpisodeMetrics:
+    """Run one calibration episode and return engineering metrics.
+
+    `steps_to_threshold` is the first measurement step where the true reward reaches a
+    fraction of this episode's hidden optimum. `boundary_hits` is a simple safety proxy:
+    how often the policy drives calibration parameters to the edge of the valid range.
+    """
     obs = env.reset()
     best_true = env.true_reward_at(obs)
+    threshold = env.optimum_true_reward() * threshold_fraction
+    steps_to_threshold = 0 if best_true >= threshold else None
+    control_effort = 0
+    boundary_hits = 0
     done = False
     while not done:
         action = agent.act(obs)
         result = env.step(action)
+        control_effort += 0 if action == ACTIONS.index("stay") else 1
+        x, y = result.obs
+        if x in (0, env.levels - 1) or y in (0, env.levels - 1):
+            boundary_hits += 1
         if learn:
             agent.observe(obs, action, result.noisy_reward, result.obs, result.done)
         obs = result.obs
         best_true = max(best_true, result.true_reward)
+        if steps_to_threshold is None and best_true >= threshold:
+            steps_to_threshold = env.steps
         done = result.done
-    return best_true
+    return EpisodeMetrics(
+        best_true_reward=best_true,
+        steps_to_threshold=steps_to_threshold,
+        control_effort=control_effort,
+        boundary_hits=boundary_hits,
+    )

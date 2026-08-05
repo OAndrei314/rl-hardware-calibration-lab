@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
-from .experiment import evaluate_agents, train_qlearning_agent
+from .experiment import evaluate_agents, render_markdown_report, train_qlearning_agent
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--train-episodes", type=int, default=300)
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--report", help="optional markdown report path")
     args = parser.parse_args(argv)
 
     print(
@@ -42,9 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print()
-    print(f"{'strategy':<15} {'mean best true reward':<25} {'std':<10}")
+    print(
+        f"{'strategy':<15} {'mean best true reward':<25} {'success':<10} "
+        f"{'steps<thr':<12} {'effort':<10}"
+    )
     for r in results:
-        print(f"{r.agent_name:<15} {r.mean:<25.4f} {r.std:<10.4f}")
+        print(
+            f"{r.agent_name:<15} {r.mean:<25.4f} {r.success_rate:<10.1%} "
+            f"{r.mean_steps_to_threshold:<12.2f} {r.mean_control_effort:<10.2f}"
+        )
+    if args.report:
+        path = Path(args.report)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_markdown_report(results), encoding="utf-8")
     return 0
 
 

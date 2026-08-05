@@ -1,4 +1,8 @@
-from hw_validation_sim.experiment import evaluate_agents, train_qlearning_agent
+from hw_validation_sim.experiment import (
+    evaluate_agents,
+    render_markdown_report,
+    train_qlearning_agent,
+)
 
 
 def test_trained_qlearning_beats_both_baselines():
@@ -23,3 +27,20 @@ def test_trained_qlearning_beats_both_baselines():
     # Random search and hill climbing should be roughly comparable at this budget --
     # neither gets to exploit unit-to-unit similarity the way the trained agent does.
     assert abs(results["random_search"].mean - results["hill_climb"].mean) < 0.15
+
+
+def test_markdown_report_contains_money_metrics():
+    agent = train_qlearning_agent(
+        levels=12, train_episodes=40, max_steps=24, noise_std=0.05,
+        unit_variation=1.0, seed=3,
+    )
+    results = evaluate_agents(
+        agent, levels=12, eval_episodes=8, max_steps=24, noise_std=0.05,
+        unit_variation=1.0, seed=3,
+    )
+
+    report = render_markdown_report(results)
+
+    assert "mean steps to threshold" in report
+    assert "Money Signal" in report
+    assert "q_learning" in report
