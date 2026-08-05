@@ -1,5 +1,5 @@
 [project]
-name = "rl-hw-validation-sim"
+name = "rl-hardware-calibration-lab"
 version = "0.1.0"
 description = "RL vs. classical search strategies for simulated hardware calibration."
 requires-python = ">=3.10"

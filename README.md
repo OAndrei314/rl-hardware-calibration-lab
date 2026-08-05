@@ -1,4 +1,4 @@
-# rl-hw-validation-sim
+# rl-hardware-calibration-lab
 
 A small, from-scratch simulation comparing reinforcement learning against classical search
 strategies for calibrating hardware — motivated by real hardware bring-up/validation work,
