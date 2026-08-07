@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "rl-hardware-calibration-lab"
 version = "0.1.0"
@@ -5,6 +9,9 @@ description = "RL vs. classical search strategies for simulated hardware calibra
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = ["numpy>=1.26"]
+
+[tool.setuptools]
+packages = ["hw_validation_sim"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
