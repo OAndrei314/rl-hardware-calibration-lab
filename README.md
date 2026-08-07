@@ -1,9 +1,24 @@
-# rl-hw-validation-sim
+# rl-hardware-calibration-lab
 
 A small, from-scratch simulation comparing reinforcement learning against classical search
 strategies for calibrating hardware — motivated by real hardware bring-up/validation work,
 where every measurement is slow and every "unit" (device off the line) starts from a
 slightly different optimal calibration point.
+
+## Research + money thesis
+
+**Research question:** under noisy measurements, unit-to-unit variation, and a fixed
+measurement budget, can a learned policy exploit shared structure across devices better
+than per-unit search?
+
+**Money question:** calibration time is not abstract. Every measurement can consume tester
+occupancy, thermal settling time, lab/debug time, and production capacity. In AI
+infrastructure and optical hardware, where power, thermals, and link margins are expensive
+constraints, a useful controller optimizes reward per measurement and avoids unsafe
+regions, not just final score.
+
+**Engineering evidence:** the experiment reports mean best true reward, success rate,
+mean steps to threshold, control effort, and boundary hits on held-out simulated units.
 
 ## The problem this models
 
@@ -45,7 +60,8 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
 
 ```bash
 pip install -r requirements.txt
-python -m hw_validation_sim.cli --train-episodes 300 --eval-episodes 100 --seed 0
+python -m hw_validation_sim.cli --train-episodes 300 --eval-episodes 100 --seed 0 \
+  --report reports/seed0.md
 ```
 
 ## Honest results
@@ -58,6 +74,10 @@ unit, 300 training units, 100 held-out eval units, seed 0):
 | random_search | 0.549 | 0.287 |
 | hill_climb | 0.557 | 0.285 |
 | q_learning | 0.854 | 0.167 |
+
+The CLI also reports success rate, mean steps to threshold, mean control effort, and
+boundary hits. Those metrics matter commercially because they map to test-station time,
+control activity, and safety margin.
 
 Two things worth being honest about:
 1. **Random search and hill-climbing come out roughly tied.** With a 40-step budget on a
