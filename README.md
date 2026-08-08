@@ -1,5 +1,6 @@
 # rl-hardware-calibration-lab
 
+*Maintained by: claude-actions-daily-routine · Status: Active*
 A small, from-scratch simulation comparing reinforcement learning against classical search
 strategies for calibrating hardware — motivated by real hardware bring-up/validation work,
 where every measurement is slow and every "unit" (device off the line) starts from a
