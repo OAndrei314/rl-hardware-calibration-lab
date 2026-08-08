@@ -6,13 +6,13 @@ strategies for calibrating hardware — motivated by real hardware bring-up/vali
 where every measurement is slow and every "unit" (device off the line) starts from a
 slightly different optimal calibration point.
 
-## Research + money thesis
+## Why this matters
 
 **Research question:** under noisy measurements, unit-to-unit variation, and a fixed
 measurement budget, can a learned policy exploit shared structure across devices better
 than per-unit search?
 
-**Money question:** calibration time is not abstract. Every measurement can consume tester
+**Practical impact:** calibration time is not abstract. Every measurement can consume tester
 occupancy, thermal settling time, lab/debug time, and production capacity. In AI
 infrastructure and optical hardware, where power, thermals, and link margins are expensive
 constraints, a useful controller optimizes reward per measurement and avoids unsafe
