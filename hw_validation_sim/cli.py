@@ -4,7 +4,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .experiment import evaluate_agents, render_markdown_report, train_qlearning_agent
+from .experiment import (
+    evaluate_agents,
+    render_markdown_report,
+    run_resolution_comparison,
+    train_qlearning_agent,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,7 +22,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--report", help="optional markdown report path")
+    parser.add_argument(
+        "--compare-resolutions",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="LEVELS",
+        help=(
+            "instead of the baseline comparison, train tabular Q-learning and "
+            "linear-FA Q-learning at each given grid resolution (same fixed "
+            "training/eval budget) and report how each strategy's performance "
+            "changes as the grid gets too fine for the tabular table to cover"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.compare_resolutions:
+        print(
+            f"Comparing tabular vs. linear-FA Q-learning across resolutions "
+            f"{args.compare_resolutions} with a fixed {args.train_episodes}-episode "
+            f"training budget..."
+        )
+        print()
+        print(f"{'levels':<8} {'strategy':<22} {'mean best true reward':<25} {'success':<10}")
+        for levels in args.compare_resolutions:
+            results = run_resolution_comparison(
+                levels=levels,
+                train_episodes=args.train_episodes,
+                eval_episodes=args.eval_episodes,
+                max_steps=args.max_steps,
+                noise_std=args.noise_std,
+                unit_variation=args.unit_variation,
+                seed=args.seed,
+            )
+            for r in results:
+                print(f"{levels:<8} {r.agent_name:<22} {r.mean:<25.4f} {r.success_rate:<10.1%}")
+        return 0
 
     print(
         f"Training Q-learning agent on {args.train_episodes} simulated units "

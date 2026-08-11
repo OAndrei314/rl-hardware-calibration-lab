@@ -44,7 +44,7 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
   clarity). Two discretized parameters, Gaussian-bump reward landscape with a global and a
   decoy local optimum, per-episode random offset for unit-to-unit variation, Gaussian
   measurement noise.
-- `hw_validation_sim/agents.py` — three strategies on equal footing (same step budget, same
+- `hw_validation_sim/agents.py` — four strategies on equal footing (same step budget, same
   `act()`/`observe()` interface):
   - `RandomSearchAgent` — the floor.
   - `HillClimbAgent` — propose a random move, keep it if the noisy reading improved on the
@@ -52,6 +52,9 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
     rule-based calibration procedures work.
   - `QLearningAgent` — tabular Q-learning, trained across many simulated units before
     evaluation.
+  - `LinearFAQAgent` — Q-learning with linear function approximation over a fixed grid of
+    radial basis function (RBF) features, for when the grid is too fine for a tabular
+    Q-table to get a useful number of visits per cell within a fixed training budget.
 - `hw_validation_sim/experiment.py` — trains the Q-learning agent, then evaluates all three
   on **held-out** units using common random numbers per eval episode (all three agents face
   the identical noise sequence and unit offset in a given eval episode, so differences in
@@ -63,6 +66,10 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
 pip install -r requirements.txt
 python -m hw_validation_sim.cli --train-episodes 300 --eval-episodes 100 --seed 0 \
   --report reports/seed0.md
+
+# Compare tabular vs. linear-FA Q-learning as the calibration grid gets finer, under
+# the same fixed 300-episode training budget:
+python -m hw_validation_sim.cli --compare-resolutions 20 60 100 150 200 --seed 0
 ```
 
 ## Honest results
@@ -95,12 +102,57 @@ Two things worth being honest about:
    where the Q-table had converged enough to be useful. Worth remembering before assuming
    "add RL" is automatically a win; here it very much depended on giving it enough data.
 
+### Does function approximation actually help at finer resolution?
+
+The tabular agent's edge above only holds because a 20×20 grid (2,000 Q-table cells) can get
+a useful number of visits from 300 training units × 40 steps. `--compare-resolutions` trains
+both the tabular agent and `LinearFAQAgent` (36 RBF centers) at increasingly fine grids,
+**holding the training budget fixed at 300 episodes**, then evaluates both on 100 held-out
+units (seed 0):
+
+| grid (levels²) | tabular cells | tabular mean reward | tabular success | FA mean reward | FA success |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20×20 | 2,000 | 0.841 | 67% | 0.600 | 25% |
+| 60×60 | 18,000 | 0.843 | 50% | 0.666 | 7% |
+| 100×100 | 50,000 | 0.702 | 3% | 0.738 | 10% |
+| 150×150 | 112,500 | 0.380 | 0% | **0.501** | 0% |
+
+The story is real but not clean, and it's worth reporting honestly rather than rounding it
+off into a tidy narrative:
+- The tabular agent's performance degrades as the grid gets finer under the same fixed
+  budget — exactly the budget-starvation the "next steps" note below predicted. FA degrades
+  too (the underlying problem is genuinely harder at 150×150 than 20×20 — steps are still
+  single grid cells, so the same 40-step budget covers proportionally less ground), but more
+  gracefully, and crosses over to beat tabular by 100×100–150×150.
+- **That crossover does not hold indefinitely.** At 200×200 (seed 0), tabular actually
+  recovers relative to FA (tabular 0.325 vs. FA 0.193) — both agents are so budget-starved at
+  that resolution that the comparison is dominated by which one got luckier with its training
+  trajectory, not by which representation generalizes better. Averaging over 8 training
+  seeds at 200×200 shows FA ahead on average (0.49 vs. 0.38) but with high variance in both
+  (std ≈ 0.2–0.23) — so "FA wins at extreme resolution" is a tendency, not a guarantee, on
+  the noisy single-seed numbers a real run would see.
+- **The effect is noisy at the individual-seed level in general.** At 20×20, a spot-check
+  across 8 training seeds found tabular ahead of FA about 75% of the time, not 100% — so the
+  single-seed numbers above are representative, not definitive. If you need a specific
+  resolution's ranking to be reliable rather than "usually true," train several seeds and
+  compare means, the same way the 8-seed spot-check above did.
+
 ## Status / next steps
 
-Tabular Q-learning only works because the state space is small (20×20). A continuous
-calibration space would need function approximation (e.g. a small neural Q-network) instead
-— a natural next step, along with reporting steps-to-threshold rather than only best reward
-found.
+Implemented: `LinearFAQAgent`, a linear function approximator over RBF features, as the
+next step this README used to call for ("a continuous calibration space would need function
+approximation instead"). It's linear rather than a small neural net — a semi-gradient update
+with a fixed feature map needs no optimizer or network-shape search, and the weight vector
+stays directly inspectable, which matters for a controller you'd want to validate before
+trusting it near a hardware safety limit. See "Does function approximation actually help at
+finer resolution?" above for the honest, noisy-in-places result.
+
+Remaining open threads: the RBF center grid (6×6) and its width are fixed by hand rather
+than tuned per resolution, and steps-to-threshold is now reported but not yet used as an
+optimization target (agents are still trained to maximize reward, not to minimize
+measurements-to-acceptable). A per-resolution sweep of RBF center count, run across enough
+training seeds to get real confidence intervals instead of single-seed point estimates,
+would be the next thing to do here.
 
 ## License
 
