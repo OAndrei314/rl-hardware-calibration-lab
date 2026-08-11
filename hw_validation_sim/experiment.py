@@ -10,6 +10,7 @@ import numpy as np
 from .agents import (
     EpisodeMetrics,
     HillClimbAgent,
+    LinearFAQAgent,
     QLearningAgent,
     RandomSearchAgent,
     run_episode,
@@ -79,6 +80,66 @@ def train_qlearning_agent(
     return agent
 
 
+def train_function_approx_agent(
+    levels: int,
+    train_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+) -> LinearFAQAgent:
+    agent = LinearFAQAgent(levels=levels, rng=np.random.default_rng(seed + 2))
+    for i in range(train_episodes):
+        env = CalibrationEnv(
+            levels=levels,
+            max_steps=max_steps,
+            noise_std=noise_std,
+            unit_variation=unit_variation,
+            seed=seed + i,
+        )
+        run_episode(env, agent, learn=True)
+    return agent
+
+
+def run_resolution_comparison(
+    levels: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+) -> list[ExperimentResult]:
+    """Train tabular Q-learning and linear-FA Q-learning on the *same* fixed training
+    budget at the given grid resolution, then evaluate both fresh on held-out units.
+
+    At high `levels`, the tabular Q-table has more cells than the training budget can
+    give even one visit to, so it can only have learned about a fraction of the space.
+    The FA agent's RBF features let one update generalize to nearby, unvisited cells,
+    which is the whole motivation for reaching for function approximation here.
+    """
+    tabular = train_qlearning_agent(
+        levels, train_episodes, max_steps, noise_std, unit_variation, seed
+    )
+    tabular.eval_mode()
+    fa = train_function_approx_agent(
+        levels, train_episodes, max_steps, noise_std, unit_variation, seed
+    )
+    fa.eval_mode()
+
+    results = {"q_learning_tabular": [], "q_learning_linear_fa": []}
+    for i in range(eval_episodes):
+        env_seed = seed + 20_000 + i  # disjoint from both training and other eval seeds
+
+        env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=env_seed)
+        results["q_learning_tabular"].append(run_episode_metrics(env, tabular, learn=False))
+
+        env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=env_seed)
+        results["q_learning_linear_fa"].append(run_episode_metrics(env, fa, learn=False))
+
+    return [ExperimentResult(name, rewards) for name, rewards in results.items()]
+
+
 def evaluate_agents(
     trained_qlearning: QLearningAgent,
     levels: int,
@@ -140,7 +201,7 @@ def render_markdown_report(results: list[ExperimentResult]) -> str:
     lines.extend(
         [
             "",
-            "## Money Signal",
+            "## Why these metrics, not just reward",
             "",
             "Every measurement in a real bring-up or production calibration loop consumes",
             "instrument time, operator time, thermal settling time, or test-station capacity.",

@@ -1,4 +1,4 @@
-"""Three search strategies compared on the same calibration budget:
+"""Four search strategies compared on the same calibration budget:
 
 - RandomSearchAgent: uniform random moves. The floor.
 - HillClimbAgent: measure, nudge in a random direction, keep the move if the noisy
@@ -7,6 +7,10 @@
 - QLearningAgent: tabular Q-learning, trained across many simulated "units" so it can
   learn the general shape of the landscape (including the decoy local optimum) instead
   of re-discovering it from scratch on every new unit.
+- LinearFAQAgent: Q-learning with linear function approximation over radial basis
+  function (RBF) features, for when the calibration grid is too fine for a tabular
+  Q-table to get enough visits per cell within a fixed measurement budget (see
+  `experiment.run_resolution_comparison`).
 """
 from __future__ import annotations
 
@@ -92,6 +96,75 @@ class QLearningAgent:
         nx, ny = next_obs
         target = reward + (0.0 if done else self.gamma * np.max(self.q[nx, ny]))
         self.q[x, y, action] += self.alpha * (target - self.q[x, y, action])
+
+    def eval_mode(self) -> None:
+        self.training = False
+
+
+class LinearFAQAgent:
+    """Q-learning with linear function approximation: Q(s, a) = w[a] . phi(s), where
+    phi(s) is a vector of radial basis function (RBF) responses to a fixed grid of
+    centers spanning the calibration space, plus a bias term.
+
+    Unlike the tabular agent, this does not need to visit every (x, y) cell to learn
+    something useful about it -- an update at one point moves the weights for every
+    RBF center whose bump overlaps that point, so nearby, never-visited states inherit
+    part of the update. That is the point of function approximation, and exactly what
+    a tabular Q-table cannot do. We use a linear model (rather than a small neural
+    net, as originally sketched in this repo's next-steps note) because it is a
+    semi-gradient update with a closed-form feature map: no optimizer, no
+    hyperparameter search over network shape, and the weight vector is directly
+    inspectable -- which matters for a calibration controller you'd actually want to
+    validate before trusting it near hardware safety limits.
+    """
+
+    def __init__(
+        self,
+        levels: int,
+        rng: np.random.Generator,
+        n_centers_per_dim: int = 6,
+        alpha: float = 0.05,
+        gamma: float = 0.9,
+        epsilon: float = 0.15,
+    ):
+        self.levels = levels
+        self.rng = rng
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.training = True
+
+        centers_1d = np.linspace(0, levels - 1, n_centers_per_dim)
+        cx, cy = np.meshgrid(centers_1d, centers_1d)
+        self.centers = np.stack([cx.ravel(), cy.ravel()], axis=1)  # (n_centers, 2)
+        self.sigma = levels / n_centers_per_dim
+        self.n_features = len(self.centers) + 1  # + bias
+        self.weights = np.zeros((len(ACTIONS), self.n_features))
+
+    def _features(self, obs: tuple[int, int]) -> np.ndarray:
+        xy = np.array(obs, dtype=float)
+        d2 = np.sum((self.centers - xy) ** 2, axis=1)
+        rbf = np.exp(-d2 / (2 * self.sigma**2))
+        return np.concatenate([rbf, [1.0]])
+
+    def act(self, obs: tuple[int, int]) -> int:
+        if self.training and self.rng.random() < self.epsilon:
+            return int(self.rng.integers(0, len(ACTIONS)))
+        phi = self._features(obs)
+        return int(np.argmax(self.weights @ phi))
+
+    def observe(self, obs, action, reward, next_obs, done) -> None:
+        if not self.training:
+            return
+        phi = self._features(obs)
+        q_sa = float(self.weights[action] @ phi)
+        if done:
+            target = reward
+        else:
+            next_phi = self._features(next_obs)
+            target = reward + self.gamma * float(np.max(self.weights @ next_phi))
+        td_error = target - q_sa
+        self.weights[action] += self.alpha * td_error * phi
 
     def eval_mode(self) -> None:
         self.training = False
