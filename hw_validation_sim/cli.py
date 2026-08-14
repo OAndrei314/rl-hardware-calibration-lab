@@ -7,6 +7,7 @@ from pathlib import Path
 from .experiment import (
     evaluate_agents,
     render_markdown_report,
+    run_center_sweep,
     run_resolution_comparison,
     train_qlearning_agent,
 )
@@ -35,7 +36,56 @@ def main(argv: list[str] | None = None) -> int:
             "changes as the grid gets too fine for the tabular table to cover"
         ),
     )
+    parser.add_argument(
+        "--sweep-centers-at-levels",
+        type=int,
+        default=None,
+        metavar="LEVELS",
+        help=(
+            "instead of the baseline or resolution comparisons, sweep the linear-FA "
+            "agent's RBF center count at this single grid resolution, averaging each "
+            "count over --sweep-seeds independent training seeds to get a real "
+            "confidence interval instead of a single-seed point estimate"
+        ),
+    )
+    parser.add_argument(
+        "--center-counts",
+        type=int,
+        nargs="+",
+        default=[4, 6, 8, 10, 14],
+        metavar="N",
+        help="candidate n_centers_per_dim values for --sweep-centers-at-levels",
+    )
+    parser.add_argument(
+        "--sweep-seeds",
+        type=int,
+        default=8,
+        help="independent training seeds averaged per center count in --sweep-centers-at-levels",
+    )
     args = parser.parse_args(argv)
+
+    if args.sweep_centers_at_levels is not None:
+        print(
+            f"Sweeping RBF center count {args.center_counts} at levels="
+            f"{args.sweep_centers_at_levels}, {args.sweep_seeds} training seeds each, "
+            f"fixed {args.train_episodes}-episode training budget..."
+        )
+        print()
+        points = run_center_sweep(
+            levels=args.sweep_centers_at_levels,
+            center_counts=args.center_counts,
+            n_seeds=args.sweep_seeds,
+            train_episodes=args.train_episodes,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            base_seed=args.seed,
+        )
+        print(f"{'centers/dim':<14}{'mean reward':<14}{'std (seeds)':<14}{'95% CI +/-':<12}")
+        for p in points:
+            print(f"{p.n_centers_per_dim:<14}{p.mean:<14.4f}{p.std:<14.4f}{p.ci95_halfwidth:<12.4f}")
+        return 0
 
     if args.compare_resolutions:
         print(
