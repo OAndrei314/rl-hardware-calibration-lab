@@ -87,8 +87,11 @@ def train_function_approx_agent(
     noise_std: float,
     unit_variation: float,
     seed: int,
+    n_centers_per_dim: int = 6,
 ) -> LinearFAQAgent:
-    agent = LinearFAQAgent(levels=levels, rng=np.random.default_rng(seed + 2))
+    agent = LinearFAQAgent(
+        levels=levels, rng=np.random.default_rng(seed + 2), n_centers_per_dim=n_centers_per_dim
+    )
     for i in range(train_episodes):
         env = CalibrationEnv(
             levels=levels,
@@ -138,6 +141,77 @@ def run_resolution_comparison(
         results["q_learning_linear_fa"].append(run_episode_metrics(env, fa, learn=False))
 
     return [ExperimentResult(name, rewards) for name, rewards in results.items()]
+
+
+@dataclass
+class CenterSweepPoint:
+    """One RBF center-count's results, aggregated across independent training seeds
+    (not a single-seed point estimate) at a fixed grid resolution and training
+    budget."""
+
+    n_centers_per_dim: int
+    seed_means: list[float]
+
+    @property
+    def mean(self) -> float:
+        return float(np.mean(self.seed_means))
+
+    @property
+    def std(self) -> float:
+        """Sample std (ddof=1) of the per-seed mean rewards -- how much the center
+        count's performance itself varies from one training run to the next."""
+        return float(np.std(self.seed_means, ddof=1)) if len(self.seed_means) > 1 else 0.0
+
+    @property
+    def ci95_halfwidth(self) -> float:
+        """Half-width of a normal-approximation 95% CI on the across-seed mean.
+        NaN with fewer than 2 seeds, since a CI is meaningless without variance."""
+        n = len(self.seed_means)
+        if n < 2:
+            return float("nan")
+        return float(1.96 * self.std / np.sqrt(n))
+
+
+def run_center_sweep(
+    levels: int,
+    center_counts: list[int],
+    n_seeds: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    base_seed: int,
+) -> list[CenterSweepPoint]:
+    """At a fixed grid resolution and training budget, train the linear-FA agent at
+    each candidate RBF center count across `n_seeds` independent training seeds, and
+    report the distribution of each center count's per-seed mean held-out reward --
+    not a single-seed point estimate. The same `n_seeds` training seeds are reused
+    across every center count (a paired comparison), so differences between center
+    counts aren't confounded by which count happened to get luckier training draws.
+    """
+    points = []
+    for n_centers in center_counts:
+        seed_means = []
+        for s in range(n_seeds):
+            seed = base_seed + s * 1000  # well clear of any one seed's own episode range
+            agent = train_function_approx_agent(
+                levels,
+                train_episodes,
+                max_steps,
+                noise_std,
+                unit_variation,
+                seed,
+                n_centers_per_dim=n_centers,
+            )
+            agent.eval_mode()
+            rewards = []
+            for i in range(eval_episodes):
+                env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=seed + 20_000 + i)
+                rewards.append(run_episode_metrics(env, agent, learn=False).best_true_reward)
+            seed_means.append(float(np.mean(rewards)))
+        points.append(CenterSweepPoint(n_centers, seed_means))
+    return points
 
 
 def evaluate_agents(
