@@ -78,6 +78,11 @@ python -m hw_validation_sim.cli --compare-resolutions 20 60 100 150 200 --seed 0
 # multiple training seeds to get a real confidence interval per center count:
 python -m hw_validation_sim.cli --sweep-centers-at-levels 150 \
   --center-counts 3 4 6 8 10 14 20 --sweep-seeds 12 --seed 0
+
+# Sweep the linear-FA agent's RBF width (sigma_scale, a multiplier on the default
+# one-grid-spacing-between-centers width) at a fixed resolution and center count:
+python -m hw_validation_sim.cli --sweep-sigma-at-levels 150 --sigma-sweep-centers 14 \
+  --sigma-scales 0.2 0.4 0.6 0.8 1.0 1.5 2.0 3.0 --sweep-seeds 12 --seed 0
 ```
 
 ## Honest results
@@ -180,6 +185,50 @@ Two things worth being honest about here too:
    as a hyperparameter recommendation would have been reporting noise. This is exactly the
    failure mode the "Status / next steps" note below used to flag before this sweep existed.
 
+### Does RBF width matter, independently of center count?
+
+The center-count sweep above holds each RBF's width (`sigma`) fixed by a hand-picked
+formula (`levels / n_centers_per_dim`) while varying how many centers there are.
+`--sweep-sigma-at-levels` does the opposite: it fixes `n_centers_per_dim=14` (the best
+center count found above) and `levels=150`, then varies `sigma_scale`, a multiplier on
+that same formula (`sigma_scale=1.0` reproduces the center-count sweep's numbers exactly
+by construction). Same design as above: two independent 12-seed batches (seeds 0 and 7,
+300 training episodes, 80 held-out eval units) pooled to 24 seeds per point:
+
+| sigma_scale | mean reward (24 seeds) | 95% CI half-width |
+| ---: | ---: | ---: |
+| 0.2 | 0.519 | ±0.098 |
+| 0.4 | 0.627 | ±0.105 |
+| 0.6 | **0.671** | ±0.069 |
+| 0.8 | 0.610 | ±0.075 |
+| 1.0 (formula default) | 0.616 | ±0.100 |
+| 1.5 | 0.469 | ±0.091 |
+| 2.0 | 0.339 | ±0.069 |
+| 3.0 | 0.237 | ±0.039 |
+
+Honest reading:
+1. **The hand-picked default width is not obviously optimal, but it's also not obviously
+   wrong.** `sigma_scale=0.6` (RBF bumps ~40% narrower than one grid-spacing-between-centers)
+   pooled ahead of the default `1.0` by about 0.055, but its CI (0.602–0.740) overlaps the
+   0.4/0.8/1.0 CIs almost completely — the 0.4-1.0 range is one noisy, statistically
+   indistinguishable band, the same "broad middle plateau, not a sharp peak" shape the
+   center-count sweep found.
+2. **Unlike the center-count sweep, the extremes here are unambiguous and monotonic in one
+   direction.** Every step past `1.0` toward wider RBFs (`1.5 -> 2.0 -> 3.0`) is a clear,
+   non-overlapping-CI drop — a bump wide enough to blur the global optimum and the decoy
+   local optimum together stops being able to tell them apart, which is exactly the failure
+   mode a fixed, un-swept width formula risks silently walking into on a differently-shaped
+   landscape. The narrow end (`0.2`) is worse too, though not as cleanly separated from the
+   0.4-1.0 band, consistent with under-generalizing individual updates the way too many RBF
+   centers did in the count sweep.
+3. **Net effect of both sweeps together**: at this resolution, `n_centers_per_dim=14,
+   sigma_scale≈0.6` measures modestly better (~0.67 vs ~0.50 for the repo's original
+   untuned `centers=6, sigma_scale=1.0`), but the gain over the *already-tuned* `centers=14,
+   sigma_scale=1.0` default (~0.62) is inside the noise floor at 24 seeds per point. The
+   practical takeaway for this landscape is narrower: don't use a wide RBF (`sigma_scale`
+   much above 1.0), and a fixed, un-swept width formula is a reasonable engineering default
+   as long as it isn't picking a value on the wrong side of that boundary.
+
 ## Status / next steps
 
 Implemented: `LinearFAQAgent`, a linear function approximator over RBF features, as the
@@ -195,16 +244,23 @@ center-count sweep with multi-seed confidence intervals this README used to call
 "Does RBF center count matter, and is a single seed's answer trustworthy?" above — the
 honest answer is "somewhat, but not precisely at 12 seeds per point."
 
-Remaining open threads: the RBF center grid's *width* (`sigma`, currently `levels /
-n_centers_per_dim`) is still fixed by the same hand-picked formula regardless of resolution,
-and isn't swept independently of center count — a wider or narrower RBF at a fixed center
-count could plausibly move the U-shape's peak on its own. Steps-to-threshold is now reported
-but not yet used as an optimization target (agents are still trained to maximize reward, not
-to minimize measurements-to-acceptable). Pinning down the 6-14 middle band's true peak would
-need roughly 4x today's seed count per point (variance shrinks with the square root of seed
-count, and the CIs above need to roughly halve to separate those points) — a reasonable next
-run if the exact center count ever mattered more than "somewhere in a broad, boring middle
-range, not at the extremes."
+Also implemented: `run_sigma_sweep` / `--sweep-sigma-at-levels`, sweeping the RBF grid's
+*width* (`sigma_scale`) independently of center count, the exact open thread this README
+used to flag. See "Does RBF width matter, independently of center count?" above — the
+honest answer is "a narrower-than-default width measures modestly better but isn't
+distinguishable from the default at 24 seeds per point, while a wide RBF is a clear and
+avoidable mistake."
+
+Remaining open threads: steps-to-threshold is now reported but not yet used as an
+optimization target (agents are still trained to maximize reward, not to minimize
+measurements-to-acceptable). Pinning down the 6-14 center / 0.4-1.0 sigma_scale plateau's
+true peak (if one exists at all, rather than the two hyperparameters being genuinely
+flat there) would need roughly 4x today's seed count per point (variance shrinks with the
+square root of seed count, and the CIs above need to roughly halve to separate those
+points) — a reasonable next run if the exact values ever mattered more than "somewhere in
+a broad, boring middle range, not at the extremes." A joint 2D sweep of center count and
+sigma_scale together (rather than optimizing each one at the other's already-tuned value,
+as done here) could also reveal an interaction the two 1D sweeps can't see.
 
 ## License
 

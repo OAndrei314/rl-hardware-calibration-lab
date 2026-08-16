@@ -88,9 +88,13 @@ def train_function_approx_agent(
     unit_variation: float,
     seed: int,
     n_centers_per_dim: int = 6,
+    sigma_scale: float = 1.0,
 ) -> LinearFAQAgent:
     agent = LinearFAQAgent(
-        levels=levels, rng=np.random.default_rng(seed + 2), n_centers_per_dim=n_centers_per_dim
+        levels=levels,
+        rng=np.random.default_rng(seed + 2),
+        n_centers_per_dim=n_centers_per_dim,
+        sigma_scale=sigma_scale,
     )
     for i in range(train_episodes):
         env = CalibrationEnv(
@@ -211,6 +215,79 @@ def run_center_sweep(
                 rewards.append(run_episode_metrics(env, agent, learn=False).best_true_reward)
             seed_means.append(float(np.mean(rewards)))
         points.append(CenterSweepPoint(n_centers, seed_means))
+    return points
+
+
+@dataclass
+class SigmaSweepPoint:
+    """One RBF width's results, aggregated across independent training seeds (not a
+    single-seed point estimate), at a fixed grid resolution, center count, and
+    training budget."""
+
+    sigma_scale: float
+    seed_means: list[float]
+
+    @property
+    def mean(self) -> float:
+        return float(np.mean(self.seed_means))
+
+    @property
+    def std(self) -> float:
+        """Sample std (ddof=1) of the per-seed mean rewards."""
+        return float(np.std(self.seed_means, ddof=1)) if len(self.seed_means) > 1 else 0.0
+
+    @property
+    def ci95_halfwidth(self) -> float:
+        """Half-width of a normal-approximation 95% CI on the across-seed mean.
+        NaN with fewer than 2 seeds, since a CI is meaningless without variance."""
+        n = len(self.seed_means)
+        if n < 2:
+            return float("nan")
+        return float(1.96 * self.std / np.sqrt(n))
+
+
+def run_sigma_sweep(
+    levels: int,
+    n_centers_per_dim: int,
+    sigma_scales: list[float],
+    n_seeds: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    base_seed: int,
+) -> list[SigmaSweepPoint]:
+    """At a fixed grid resolution, center count, and training budget, train the
+    linear-FA agent at each candidate RBF width (`sigma_scale`, a multiplier on the
+    default one-grid-spacing-between-centers width) across `n_seeds` independent
+    training seeds, and report the distribution of each width's per-seed mean
+    held-out reward. Reuses the same `n_seeds` training seeds across every width (a
+    paired comparison, mirroring `run_center_sweep`), so differences between widths
+    aren't confounded by which one happened to get luckier training draws.
+    """
+    points = []
+    for sigma_scale in sigma_scales:
+        seed_means = []
+        for s in range(n_seeds):
+            seed = base_seed + s * 1000  # same seed stream convention as run_center_sweep
+            agent = train_function_approx_agent(
+                levels,
+                train_episodes,
+                max_steps,
+                noise_std,
+                unit_variation,
+                seed,
+                n_centers_per_dim=n_centers_per_dim,
+                sigma_scale=sigma_scale,
+            )
+            agent.eval_mode()
+            rewards = []
+            for i in range(eval_episodes):
+                env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=seed + 20_000 + i)
+                rewards.append(run_episode_metrics(env, agent, learn=False).best_true_reward)
+            seed_means.append(float(np.mean(rewards)))
+        points.append(SigmaSweepPoint(sigma_scale, seed_means))
     return points
 
 

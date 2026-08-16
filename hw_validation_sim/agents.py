@@ -126,6 +126,7 @@ class LinearFAQAgent:
         alpha: float = 0.05,
         gamma: float = 0.9,
         epsilon: float = 0.15,
+        sigma_scale: float = 1.0,
     ):
         self.levels = levels
         self.rng = rng
@@ -137,7 +138,11 @@ class LinearFAQAgent:
         centers_1d = np.linspace(0, levels - 1, n_centers_per_dim)
         cx, cy = np.meshgrid(centers_1d, centers_1d)
         self.centers = np.stack([cx.ravel(), cy.ravel()], axis=1)  # (n_centers, 2)
-        self.sigma = levels / n_centers_per_dim
+        # `sigma_scale` scales the RBF width away from the hand-picked default of one
+        # grid spacing between centers (sigma_scale=1.0 reproduces prior behavior).
+        # Narrower (< 1) bumps overlap less between centers; wider (> 1) bumps
+        # generalize a training update across more of the grid per visit.
+        self.sigma = (levels / n_centers_per_dim) * sigma_scale
         self.n_features = len(self.centers) + 1  # + bias
         self.weights = np.zeros((len(ACTIONS), self.n_features))
 
