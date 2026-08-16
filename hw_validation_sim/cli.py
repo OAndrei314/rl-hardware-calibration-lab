@@ -9,6 +9,7 @@ from .experiment import (
     render_markdown_report,
     run_center_sweep,
     run_resolution_comparison,
+    run_sigma_sweep,
     train_qlearning_agent,
 )
 
@@ -60,9 +61,64 @@ def main(argv: list[str] | None = None) -> int:
         "--sweep-seeds",
         type=int,
         default=8,
-        help="independent training seeds averaged per center count in --sweep-centers-at-levels",
+        help=(
+            "independent training seeds averaged per point in --sweep-centers-at-levels "
+            "or --sweep-sigma-at-levels"
+        ),
+    )
+    parser.add_argument(
+        "--sweep-sigma-at-levels",
+        type=int,
+        default=None,
+        metavar="LEVELS",
+        help=(
+            "instead of the other modes, sweep the linear-FA agent's RBF width "
+            "(sigma_scale, a multiplier on the default one-grid-spacing-between-centers "
+            "width) at this grid resolution and a fixed center count, averaging each "
+            "width over --sweep-seeds independent training seeds"
+        ),
+    )
+    parser.add_argument(
+        "--sigma-scales",
+        type=float,
+        nargs="+",
+        default=[0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0],
+        metavar="SCALE",
+        help="candidate sigma_scale values for --sweep-sigma-at-levels",
+    )
+    parser.add_argument(
+        "--sigma-sweep-centers",
+        type=int,
+        default=14,
+        metavar="N",
+        help="fixed n_centers_per_dim to hold constant while sweeping sigma_scale",
     )
     args = parser.parse_args(argv)
+
+    if args.sweep_sigma_at_levels is not None:
+        print(
+            f"Sweeping RBF sigma_scale {args.sigma_scales} at levels="
+            f"{args.sweep_sigma_at_levels}, centers/dim={args.sigma_sweep_centers}, "
+            f"{args.sweep_seeds} training seeds each, fixed {args.train_episodes}-episode "
+            "training budget..."
+        )
+        print()
+        points = run_sigma_sweep(
+            levels=args.sweep_sigma_at_levels,
+            n_centers_per_dim=args.sigma_sweep_centers,
+            sigma_scales=args.sigma_scales,
+            n_seeds=args.sweep_seeds,
+            train_episodes=args.train_episodes,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            base_seed=args.seed,
+        )
+        print(f"{'sigma_scale':<14}{'mean reward':<14}{'std (seeds)':<14}{'95% CI +/-':<12}")
+        for p in points:
+            print(f"{p.sigma_scale:<14}{p.mean:<14.4f}{p.std:<14.4f}{p.ci95_halfwidth:<12.4f}")
+        return 0
 
     if args.sweep_centers_at_levels is not None:
         print(

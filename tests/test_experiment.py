@@ -1,13 +1,17 @@
 import math
 
+import numpy as np
 import pytest
 
+from hw_validation_sim.agents import LinearFAQAgent
 from hw_validation_sim.experiment import (
     CenterSweepPoint,
+    SigmaSweepPoint,
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
     run_resolution_comparison,
+    run_sigma_sweep,
     train_qlearning_agent,
 )
 
@@ -128,4 +132,73 @@ def test_center_sweep_reuses_the_same_seed_stream_across_seed_counts():
     )
     short = run_center_sweep(n_seeds=2, **common)
     long = run_center_sweep(n_seeds=4, **common)
+    assert long[0].seed_means[:2] == short[0].seed_means
+
+
+def test_sigma_scale_one_reproduces_prior_default_width():
+    """sigma_scale=1.0 must reproduce the pre-existing hand-picked width formula
+    (levels / n_centers_per_dim) exactly, so this is a pure additive change -- every
+    number already in the README stays valid."""
+    default_agent = LinearFAQAgent(levels=20, rng=np.random.default_rng(0), n_centers_per_dim=6)
+    scaled_agent = LinearFAQAgent(
+        levels=20, rng=np.random.default_rng(0), n_centers_per_dim=6, sigma_scale=1.0
+    )
+    assert scaled_agent.sigma == pytest.approx(default_agent.sigma)
+
+    narrower_agent = LinearFAQAgent(
+        levels=20, rng=np.random.default_rng(0), n_centers_per_dim=6, sigma_scale=0.5
+    )
+    assert narrower_agent.sigma == pytest.approx(default_agent.sigma * 0.5)
+
+
+
+def test_sigma_sweep_point_stats_are_computed_correctly():
+    """Pure statistics check, no simulation -- same shape as the center-sweep
+    equivalent since both dataclasses share the same mean/std/CI formulas."""
+    point = SigmaSweepPoint(sigma_scale=1.0, seed_means=[0.4, 0.5, 0.6, 0.7])
+    assert point.mean == pytest.approx(0.55)
+    assert point.std == pytest.approx(0.12909944, abs=1e-6)
+    assert point.ci95_halfwidth == pytest.approx(1.96 * point.std / 2, abs=1e-6)
+
+
+def test_sigma_sweep_point_ci_is_nan_with_fewer_than_two_seeds():
+    point = SigmaSweepPoint(sigma_scale=1.0, seed_means=[0.5])
+    assert point.std == 0.0
+    assert math.isnan(point.ci95_halfwidth)
+
+
+def test_sigma_sweep_returns_one_point_per_requested_scale_in_order():
+    points = run_sigma_sweep(
+        levels=20, n_centers_per_dim=6, sigma_scales=[0.5, 2.0], n_seeds=2,
+        train_episodes=15, eval_episodes=5, max_steps=20, noise_std=0.05,
+        unit_variation=1.0, base_seed=0,
+    )
+    assert [p.sigma_scale for p in points] == [0.5, 2.0]
+    assert all(len(p.seed_means) == 2 for p in points)
+
+
+def test_sigma_sweep_is_deterministic_given_the_same_seeds():
+    """No hidden global randomness -- rerunning with identical arguments must give
+    bit-for-bit identical per-seed means, mirroring the center-sweep determinism
+    guarantee."""
+    kwargs = dict(
+        levels=20, n_centers_per_dim=6, sigma_scales=[1.5], n_seeds=3,
+        train_episodes=15, eval_episodes=5, max_steps=20, noise_std=0.05,
+        unit_variation=1.0, base_seed=1,
+    )
+    first = run_sigma_sweep(**kwargs)
+    second = run_sigma_sweep(**kwargs)
+    assert first[0].seed_means == second[0].seed_means
+
+
+def test_sigma_sweep_reuses_the_same_seed_stream_across_seed_counts():
+    """Paired-comparison design, same guarantee as run_center_sweep: the first N
+    seeds of a short run must match the first N seeds of a longer run at the same
+    sigma_scale."""
+    common = dict(
+        levels=20, n_centers_per_dim=6, sigma_scales=[1.5], train_episodes=15,
+        eval_episodes=5, max_steps=20, noise_std=0.05, unit_variation=1.0, base_seed=2,
+    )
+    short = run_sigma_sweep(n_seeds=2, **common)
+    long = run_sigma_sweep(n_seeds=4, **common)
     assert long[0].seed_means[:2] == short[0].seed_means
