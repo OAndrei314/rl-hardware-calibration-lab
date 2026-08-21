@@ -8,6 +8,7 @@ from .experiment import (
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
+    run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
     train_qlearning_agent,
@@ -93,7 +94,54 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="fixed n_centers_per_dim to hold constant while sweeping sigma_scale",
     )
+    parser.add_argument(
+        "--sweep-joint-at-levels",
+        type=int,
+        default=None,
+        metavar="LEVELS",
+        help=(
+            "instead of the other modes, sweep RBF center count and sigma_scale "
+            "together (every combination of --center-counts x --sigma-scales) at "
+            "this grid resolution, averaging each combination over --sweep-seeds "
+            "independent training seeds -- reveals interactions between the two "
+            "hyperparameters that the separate 1D sweeps can't see"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.sweep_joint_at_levels is not None:
+        print(
+            f"Sweeping RBF center count {args.center_counts} x sigma_scale "
+            f"{args.sigma_scales} jointly at levels={args.sweep_joint_at_levels}, "
+            f"{args.sweep_seeds} training seeds each, fixed {args.train_episodes}-"
+            "episode training budget..."
+        )
+        print()
+        points = run_joint_sweep(
+            levels=args.sweep_joint_at_levels,
+            center_counts=args.center_counts,
+            sigma_scales=args.sigma_scales,
+            n_seeds=args.sweep_seeds,
+            train_episodes=args.train_episodes,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            base_seed=args.seed,
+        )
+        header = f"{'centers/dim':<14}" + "".join(f"sigma={s:<10}" for s in args.sigma_scales)
+        print(header)
+        for n_centers in args.center_counts:
+            row = [p for p in points if p.n_centers_per_dim == n_centers]
+            cells = "".join(f"{p.mean:<15.4f}" for p in row)
+            print(f"{n_centers:<14}{cells}")
+        best = max(points, key=lambda p: p.mean)
+        print()
+        print(
+            f"Best: centers/dim={best.n_centers_per_dim}, sigma_scale={best.sigma_scale}, "
+            f"mean reward={best.mean:.4f} (+/- {best.ci95_halfwidth:.4f})"
+        )
+        return 0
 
     if args.sweep_sigma_at_levels is not None:
         print(

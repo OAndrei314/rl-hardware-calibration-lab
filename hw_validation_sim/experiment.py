@@ -291,6 +291,88 @@ def run_sigma_sweep(
     return points
 
 
+@dataclass
+class JointSweepPoint:
+    """One (center count, sigma_scale) combination's results, aggregated across
+    independent training seeds, at a fixed grid resolution and training budget.
+
+    The 1D center-count and sigma-scale sweeps each optimize one hyperparameter at
+    the other's already-tuned value, which cannot see an interaction between them --
+    e.g. whether the best width depends on how many centers are in play. This joint
+    sweep trains at every combination in the given grid instead."""
+
+    n_centers_per_dim: int
+    sigma_scale: float
+    seed_means: list[float]
+
+    @property
+    def mean(self) -> float:
+        return float(np.mean(self.seed_means))
+
+    @property
+    def std(self) -> float:
+        """Sample std (ddof=1) of the per-seed mean rewards."""
+        return float(np.std(self.seed_means, ddof=1)) if len(self.seed_means) > 1 else 0.0
+
+    @property
+    def ci95_halfwidth(self) -> float:
+        """Half-width of a normal-approximation 95% CI on the across-seed mean.
+        NaN with fewer than 2 seeds, since a CI is meaningless without variance."""
+        n = len(self.seed_means)
+        if n < 2:
+            return float("nan")
+        return float(1.96 * self.std / np.sqrt(n))
+
+
+def run_joint_sweep(
+    levels: int,
+    center_counts: list[int],
+    sigma_scales: list[float],
+    n_seeds: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    base_seed: int,
+) -> list[JointSweepPoint]:
+    """At a fixed grid resolution and training budget, train the linear-FA agent at
+    every (center count, sigma_scale) combination in the given grid, each across
+    `n_seeds` independent training seeds. Returns one `JointSweepPoint` per
+    combination, in row-major (center count, then sigma_scale) order.
+
+    Reuses the same seed stream convention as `run_center_sweep` / `run_sigma_sweep`
+    (`base_seed + s * 1000` for seed index `s`), so a given seed trains on the exact
+    same sequence of simulated units regardless of which combination it's paired
+    with -- a paired comparison across the whole grid, not just within one sweep
+    axis.
+    """
+    points = []
+    for n_centers in center_counts:
+        for sigma_scale in sigma_scales:
+            seed_means = []
+            for s in range(n_seeds):
+                seed = base_seed + s * 1000
+                agent = train_function_approx_agent(
+                    levels,
+                    train_episodes,
+                    max_steps,
+                    noise_std,
+                    unit_variation,
+                    seed,
+                    n_centers_per_dim=n_centers,
+                    sigma_scale=sigma_scale,
+                )
+                agent.eval_mode()
+                rewards = []
+                for i in range(eval_episodes):
+                    env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=seed + 20_000 + i)
+                    rewards.append(run_episode_metrics(env, agent, learn=False).best_true_reward)
+                seed_means.append(float(np.mean(rewards)))
+            points.append(JointSweepPoint(n_centers, sigma_scale, seed_means))
+    return points
+
+
 def evaluate_agents(
     trained_qlearning: QLearningAgent,
     levels: int,

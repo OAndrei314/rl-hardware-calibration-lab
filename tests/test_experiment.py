@@ -6,10 +6,12 @@ import pytest
 from hw_validation_sim.agents import LinearFAQAgent
 from hw_validation_sim.experiment import (
     CenterSweepPoint,
+    JointSweepPoint,
     SigmaSweepPoint,
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
+    run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
     train_qlearning_agent,
@@ -202,3 +204,63 @@ def test_sigma_sweep_reuses_the_same_seed_stream_across_seed_counts():
     short = run_sigma_sweep(n_seeds=2, **common)
     long = run_sigma_sweep(n_seeds=4, **common)
     assert long[0].seed_means[:2] == short[0].seed_means
+
+
+def test_joint_sweep_point_stats_are_computed_correctly():
+    """Pure statistics check, no simulation -- same shape as the center/sigma sweep
+    equivalents since all three dataclasses share the same mean/std/CI formulas."""
+    point = JointSweepPoint(n_centers_per_dim=6, sigma_scale=1.0, seed_means=[0.4, 0.5, 0.6, 0.7])
+    assert point.mean == pytest.approx(0.55)
+    assert point.std == pytest.approx(0.12909944, abs=1e-6)
+    assert point.ci95_halfwidth == pytest.approx(1.96 * point.std / 2, abs=1e-6)
+
+
+def test_joint_sweep_point_ci_is_nan_with_fewer_than_two_seeds():
+    point = JointSweepPoint(n_centers_per_dim=6, sigma_scale=1.0, seed_means=[0.5])
+    assert point.std == 0.0
+    assert math.isnan(point.ci95_halfwidth)
+
+
+def test_joint_sweep_returns_one_point_per_combination_in_row_major_order():
+    points = run_joint_sweep(
+        levels=20, center_counts=[3, 5], sigma_scales=[0.5, 1.5], n_seeds=2,
+        train_episodes=15, eval_episodes=5, max_steps=20, noise_std=0.05,
+        unit_variation=1.0, base_seed=0,
+    )
+    assert [(p.n_centers_per_dim, p.sigma_scale) for p in points] == [
+        (3, 0.5), (3, 1.5), (5, 0.5), (5, 1.5),
+    ]
+    assert all(len(p.seed_means) == 2 for p in points)
+
+
+def test_joint_sweep_is_deterministic_given_the_same_seeds():
+    """No hidden global randomness, mirroring the center/sigma sweep guarantee."""
+    kwargs = dict(
+        levels=20, center_counts=[4], sigma_scales=[1.2], n_seeds=3,
+        train_episodes=15, eval_episodes=5, max_steps=20, noise_std=0.05,
+        unit_variation=1.0, base_seed=1,
+    )
+    first = run_joint_sweep(**kwargs)
+    second = run_joint_sweep(**kwargs)
+    assert first[0].seed_means == second[0].seed_means
+
+
+def test_joint_sweep_agrees_with_the_1d_sweeps_at_matching_combinations():
+    """The joint sweep must be a strict generalization of the two 1D sweeps, not a
+    parallel reimplementation that could silently drift: holding sigma_scale fixed
+    across center counts should reproduce run_center_sweep's numbers exactly, and
+    holding center count fixed across sigma scales should reproduce
+    run_sigma_sweep's numbers exactly, since both ultimately call
+    train_function_approx_agent with identical seeds and hyperparameters."""
+    common = dict(
+        levels=20, n_seeds=2, train_episodes=15, eval_episodes=5, max_steps=20,
+        noise_std=0.05, unit_variation=1.0, base_seed=5,
+    )
+
+    center_points = run_center_sweep(center_counts=[4, 8], **common)
+    joint_vs_center = run_joint_sweep(center_counts=[4, 8], sigma_scales=[1.0], **common)
+    assert [p.seed_means for p in joint_vs_center] == [p.seed_means for p in center_points]
+
+    sigma_points = run_sigma_sweep(n_centers_per_dim=6, sigma_scales=[0.5, 1.5], **common)
+    joint_vs_sigma = run_joint_sweep(center_counts=[6], sigma_scales=[0.5, 1.5], **common)
+    assert [p.seed_means for p in joint_vs_sigma] == [p.seed_means for p in sigma_points]
