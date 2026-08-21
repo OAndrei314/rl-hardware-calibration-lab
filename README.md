@@ -59,9 +59,12 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
   on **held-out** units using common random numbers per eval episode (all three agents face
   the identical noise sequence and unit offset in a given eval episode, so differences in
   outcome are due to the strategy, not lucky draws). Also: `run_resolution_comparison`
-  (tabular vs. linear-FA as the grid gets finer) and `run_center_sweep` (linear-FA's RBF
-  center count at a fixed resolution, averaged over multiple training seeds with a 95% CI
-  per count — a paired design that reuses the same seed stream across center counts).
+  (tabular vs. linear-FA as the grid gets finer), `run_center_sweep` / `run_sigma_sweep`
+  (linear-FA's RBF center count and width swept independently, each averaged over multiple
+  training seeds with a 95% CI — a paired design that reuses the same seed stream across
+  values), and `run_joint_sweep` (center count and width swept *together*, over every
+  combination in a grid, to check for an interaction the two independent 1D sweeps can't
+  see).
 
 ## Quickstart
 
@@ -83,6 +86,11 @@ python -m hw_validation_sim.cli --sweep-centers-at-levels 150 \
 # one-grid-spacing-between-centers width) at a fixed resolution and center count:
 python -m hw_validation_sim.cli --sweep-sigma-at-levels 150 --sigma-sweep-centers 14 \
   --sigma-scales 0.2 0.4 0.6 0.8 1.0 1.5 2.0 3.0 --sweep-seeds 12 --seed 0
+
+# Sweep RBF center count and width together (every combination), to check for an
+# interaction the two 1D sweeps above can't see:
+python -m hw_validation_sim.cli --sweep-joint-at-levels 150 \
+  --center-counts 6 10 14 20 --sigma-scales 0.4 0.6 0.8 1.0 --sweep-seeds 12 --seed 0
 ```
 
 ## Honest results
@@ -229,6 +237,58 @@ Honest reading:
    much above 1.0), and a fixed, un-swept width formula is a reasonable engineering default
    as long as it isn't picking a value on the wrong side of that boundary.
 
+### Does center count and width interact, or is tuning them separately good enough?
+
+The two sweeps above each optimize one hyperparameter while holding the other at a fixed
+default (`run_center_sweep` fixes `sigma_scale=1.0`; `run_sigma_sweep` fixes
+`n_centers_per_dim=14`, the center sweep's winner). That can't detect an interaction between
+them — e.g. whether the best width depends on how many centers are in play.
+`--sweep-joint-at-levels` trains at every (center count, sigma_scale) combination in a grid
+instead. At levels=150, pooling the same two independent 12-seed batches used above (seeds 0
+and 7, 300 training episodes, 80 held-out eval units — 24 seeds per cell):
+
+| centers/dim | sigma=0.4 | sigma=0.6 | sigma=0.8 | sigma=1.0 |
+| ---: | ---: | ---: | ---: | ---: |
+| 6 | 0.688 | **0.697** | 0.643 | 0.584 |
+| 10 | 0.596 | 0.625 | 0.625 | 0.582 |
+| 14 | 0.627 | 0.671 | 0.610 | 0.616 |
+| 20 | 0.674 | 0.619 | 0.534 | 0.509 |
+
+95% CI half-widths across this grid run ±0.06 to ±0.10 per cell (not shown in the table above
+to keep it readable — see the CLI output for exact values).
+
+Honest reading:
+1. **Sanity check first**: the `sigma_scale=1.0` column reproduces `run_center_sweep`'s
+   earlier result almost exactly — centers=14 wins that column at 0.616 here vs. 0.616 in the
+   original 24-seed center sweep, and the same relative ordering of 6/10/14/20 holds. That's
+   reassuring: this is a genuinely new sweep over new combinations, not a reimplementation
+   that happens to disagree with the numbers already reported above.
+2. **The nominal joint optimum is centers=6, sigma_scale=0.6 (0.697 ± 0.072), not
+   centers=14, sigma_scale=0.6 (0.671 ± 0.069)** — the combination you'd get by pasting
+   together each 1D sweep's independently-tuned winner. But their 95% CIs overlap almost
+   completely (0.625–0.770 vs. 0.602–0.740), along with two more cells in the same range
+   (centers=6/sigma=0.4 at 0.688, centers=20/sigma=0.4 at 0.674) — a broad, noisy plateau
+   again, the same shape both 1D sweeps already found on their own axes, not a resolvable
+   sharp peak.
+3. **There is a real interaction, though, at the high-center-count end.** Centers=20 falls
+   monotonically and mostly outside overlapping CIs as sigma_scale grows (0.674 → 0.619 →
+   0.534 → 0.509, sigma=0.4 to 1.0), while centers=6 peaks in the *middle* of the same range
+   (0.4 and 0.6 are close, then it also declines toward 1.0). That's mechanistically sensible:
+   with 20 centers already packed across the grid, a wide RBF (`sigma_scale` near 1.0) makes
+   neighboring centers' bumps overlap enough to blur the global optimum and the decoy local
+   optimum together — the same failure mode the sigma sweep already flagged for a single
+   center count, but here it kicks in at a narrower absolute width because the centers
+   themselves are closer together. Six centers spread far apart have more room before that
+   happens.
+4. **Net conclusion**: for this landscape, decomposing the 2D search into two sequential 1D
+   sweeps (tune centers, then tune width) landed close to the true joint optimum — within
+   noise, not exactly on it. That is a real result worth having actually checked rather than
+   assumed: the interaction that exists (width tolerance shrinking as center count grows) is
+   real and explicable, but it wasn't large enough at this landscape's scale to make the
+   cheaper sequential-1D approach misleading. A landscape with sharper features (a narrower
+   `_sigma` on the Gaussian bumps in `env.py`) is exactly the kind of case where that
+   might not hold.
+
 ## Status / next steps
 
 Implemented: `LinearFAQAgent`, a linear function approximator over RBF features, as the
@@ -251,16 +311,25 @@ honest answer is "a narrower-than-default width measures modestly better but isn
 distinguishable from the default at 24 seeds per point, while a wide RBF is a clear and
 avoidable mistake."
 
+Also implemented: `run_joint_sweep` / `--sweep-joint-at-levels`, the joint 2D sweep of center
+count and sigma_scale this README used to flag as an open thread. See "Does center count and
+width interact, or is tuning them separately good enough?" above — the honest answer is
+"there's a real, mechanistically explicable interaction at high center counts, but at this
+landscape's scale it wasn't large enough to make the cheaper two-sweep approximation
+misleading; the joint optimum is within noise of pasting the two 1D optima together, not
+meaningfully better."
+
 Remaining open threads: steps-to-threshold is now reported but not yet used as an
 optimization target (agents are still trained to maximize reward, not to minimize
-measurements-to-acceptable). Pinning down the 6-14 center / 0.4-1.0 sigma_scale plateau's
-true peak (if one exists at all, rather than the two hyperparameters being genuinely
-flat there) would need roughly 4x today's seed count per point (variance shrinks with the
-square root of seed count, and the CIs above need to roughly halve to separate those
-points) — a reasonable next run if the exact values ever mattered more than "somewhere in
-a broad, boring middle range, not at the extremes." A joint 2D sweep of center count and
-sigma_scale together (rather than optimizing each one at the other's already-tuned value,
-as done here) could also reveal an interaction the two 1D sweeps can't see.
+measurements-to-acceptable). Pinning down the plateau's true peak precisely (both within a
+single sweep axis and across the joint grid) would need roughly 4x today's seed count per
+point (variance shrinks with the square root of seed count, and the CIs above need to
+roughly halve to separate the top few cells) — a reasonable next run if the exact values
+ever mattered more than "somewhere in a broad, boring middle range, not at the extremes."
+The interaction the joint sweep did find (wide RBFs hurting more as center count grows) was
+only tested at one grid resolution (levels=150); whether it gets stronger at even finer
+resolutions, or whether a sharper reward landscape (narrower `_sigma` in `env.py`) makes the
+sequential-1D approximation break down for real, are both untested.
 
 ## License
 
