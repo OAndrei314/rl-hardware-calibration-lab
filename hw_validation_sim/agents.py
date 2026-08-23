@@ -228,3 +228,71 @@ def run_episode_metrics(
         control_effort=control_effort,
         boundary_hits=boundary_hits,
     )
+
+
+def run_episode_shaped(
+    env: CalibrationEnv,
+    agent,
+    spec_threshold: float,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+    learn: bool = True,
+) -> EpisodeMetrics:
+    """Like `run_episode_metrics`, but the reward handed to `agent.observe()` during
+    training is SHAPED to directly reward reaching an absolute pass/fail spec bar
+    quickly, instead of shaped around the magnitude of the (noisy) measurement itself.
+
+    `q_learning`/`LinearFAQAgent` trained via `run_episode`/`run_episode_metrics`
+    maximize cumulative *measurement* reward, which is a proxy: it happens to
+    correlate with reaching an acceptable calibration fast, but nothing in that
+    training signal actually says "stop wasting measurements once you're good
+    enough." This runner instead gives the agent a small constant `-step_cost` per
+    measurement (every measurement consumes tester/thermal/operator time, whether or
+    not it moves the needle) plus a one-time `+bonus` the first step its *noisy*
+    reading crosses `spec_threshold` (the agent only ever sees noisy readings in
+    real life, so shaping must be based on what it can observe, not the hidden true
+    reward). Because the episode always runs the full `max_steps` regardless of
+    when the bar is crossed, the per-step cost is a wash between two training runs
+    of equal length -- the only real lever left to increase discounted return is
+    reaching the bonus sooner, which is exactly "minimize steps-to-threshold."
+
+    `spec_threshold` is a fixed absolute bar (not `threshold_fraction * this
+    episode's hidden optimum`, unlike `run_episode_metrics`) -- realistic for a
+    pass/fail engineering spec, which is normally an absolute number (e.g. "insertion
+    loss under budget"), not a percentage of what a specific unit could hypothetically
+    achieve if searched exhaustively.
+
+    Returns the same `EpisodeMetrics` as `run_episode_metrics` (computed from the
+    unshaped true reward, so results are directly comparable to unshaped training),
+    with `steps_to_threshold` measured against this same `spec_threshold`.
+    """
+    obs = env.reset()
+    best_true = env.true_reward_at(obs)
+    steps_to_threshold = 0 if best_true >= spec_threshold else None
+    control_effort = 0
+    boundary_hits = 0
+    reached = steps_to_threshold is not None
+    done = False
+    while not done:
+        action = agent.act(obs)
+        result = env.step(action)
+        control_effort += 0 if action == ACTIONS.index("stay") else 1
+        x, y = result.obs
+        if x in (0, env.levels - 1) or y in (0, env.levels - 1):
+            boundary_hits += 1
+        just_reached = (not reached) and (result.noisy_reward >= spec_threshold)
+        reached = reached or just_reached
+        shaped_reward = (bonus if just_reached else 0.0) - step_cost
+        if learn:
+            agent.observe(obs, action, shaped_reward, result.obs, result.done)
+        obs = result.obs
+        best_true = max(best_true, result.true_reward)
+        if steps_to_threshold is None and best_true >= spec_threshold:
+            steps_to_threshold = env.steps
+        done = result.done
+    return EpisodeMetrics(
+        best_true_reward=best_true,
+        steps_to_threshold=steps_to_threshold,
+        control_effort=control_effort,
+        boundary_hits=boundary_hits,
+    )

@@ -14,7 +14,9 @@ from hw_validation_sim.experiment import (
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
+    run_threshold_shaping_comparison,
     train_qlearning_agent,
+    train_threshold_seeking_agent,
 )
 
 
@@ -243,6 +245,77 @@ def test_joint_sweep_is_deterministic_given_the_same_seeds():
     first = run_joint_sweep(**kwargs)
     second = run_joint_sweep(**kwargs)
     assert first[0].seed_means == second[0].seed_means
+
+
+def test_threshold_seeking_agent_training_is_deterministic_given_the_same_seed():
+    """No hidden global randomness, mirroring the sweep determinism guarantees --
+    rerunning with identical arguments must give a bit-for-bit identical Q-table."""
+    kwargs = dict(
+        levels=20, train_episodes=30, max_steps=20, noise_std=0.05,
+        unit_variation=1.0, seed=4, spec_threshold=0.3,
+    )
+    first = train_threshold_seeking_agent(**kwargs)
+    second = train_threshold_seeking_agent(**kwargs)
+    assert np.array_equal(first.q, second.q)
+
+
+def test_threshold_shaping_comparison_returns_both_named_strategies():
+    results = {
+        r.agent_name: r
+        for r in run_threshold_shaping_comparison(
+            levels=12, train_episodes=20, eval_episodes=5, max_steps=15,
+            noise_std=0.05, unit_variation=1.0, seed=1,
+        )
+    }
+    assert set(results) == {"q_learning_reward_max", "q_learning_threshold_seeking"}
+    assert len(results["q_learning_reward_max"].episodes) == 5
+    assert len(results["q_learning_threshold_seeking"].episodes) == 5
+
+
+def test_threshold_shaping_underperforms_dense_reward_at_equal_budget():
+    """Honest, reproducible finding, not a hoped-for one: a sparse, one-time
+    threshold-crossing bonus is much harder for tabular Q-learning to back-propagate
+    within a fixed 300-episode budget than the dense per-step measurement reward the
+    reward-maximizing baseline gets "for free" -- even though the crossing bonus is
+    the more *direct* training signal for the metric actually being optimized for
+    (steps-to-threshold). Regression-pinned to observed behavior at this exact
+    seed/budget (reward_max success ~67%, threshold_seeking success ~2%); margin is
+    loose, not exact equality."""
+    results = {
+        r.agent_name: r
+        for r in run_threshold_shaping_comparison(
+            levels=20, train_episodes=300, eval_episodes=100, max_steps=40,
+            noise_std=0.05, unit_variation=1.5, seed=0,
+        )
+    }
+    assert results["q_learning_reward_max"].success_rate > 0.5
+    assert results["q_learning_threshold_seeking"].success_rate < 0.2
+
+
+def test_threshold_shaping_success_rate_improves_with_more_training_episodes():
+    """Confirms the underperformance above is a sparse-reward sample-efficiency
+    effect, not a stuck or broken training signal: a 10x larger training budget
+    should measurably raise the threshold-seeking agent's success rate, even though
+    (per the honest accounting in the README) it still trails the dense-reward
+    baseline even at that larger budget."""
+    small = {
+        r.agent_name: r
+        for r in run_threshold_shaping_comparison(
+            levels=20, train_episodes=300, eval_episodes=100, max_steps=40,
+            noise_std=0.05, unit_variation=1.5, seed=0,
+        )
+    }
+    large = {
+        r.agent_name: r
+        for r in run_threshold_shaping_comparison(
+            levels=20, train_episodes=3000, eval_episodes=100, max_steps=40,
+            noise_std=0.05, unit_variation=1.5, seed=0,
+        )
+    }
+    assert (
+        large["q_learning_threshold_seeking"].success_rate
+        > small["q_learning_threshold_seeking"].success_rate + 0.05
+    )
 
 
 def test_joint_sweep_agrees_with_the_1d_sweeps_at_matching_combinations():

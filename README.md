@@ -62,9 +62,12 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
   (tabular vs. linear-FA as the grid gets finer), `run_center_sweep` / `run_sigma_sweep`
   (linear-FA's RBF center count and width swept independently, each averaged over multiple
   training seeds with a 95% CI — a paired design that reuses the same seed stream across
-  values), and `run_joint_sweep` (center count and width swept *together*, over every
+  values), `run_joint_sweep` (center count and width swept *together*, over every
   combination in a grid, to check for an interaction the two independent 1D sweeps can't
-  see).
+  see), and `run_threshold_shaping_comparison` (a second tabular Q-learning agent trained
+  with `agents.run_episode_shaped`, whose reward is shaped to directly minimize
+  measurements-to-spec rather than to maximize the raw measurement, compared against the
+  standard agent on identical held-out units and an identical training budget).
 
 ## Quickstart
 
@@ -91,6 +94,12 @@ python -m hw_validation_sim.cli --sweep-sigma-at-levels 150 --sigma-sweep-center
 # interaction the two 1D sweeps above can't see:
 python -m hw_validation_sim.cli --sweep-joint-at-levels 150 \
   --center-counts 6 10 14 20 --sigma-scales 0.4 0.6 0.8 1.0 --sweep-seeds 12 --seed 0
+
+# Train a Q-learning agent with reward shaped to minimize measurements-to-spec
+# directly, and compare it against the standard reward-maximizing agent on an
+# identical training/eval budget:
+python -m hw_validation_sim.cli --compare-threshold-shaping \
+  --train-episodes 300 --eval-episodes 100 --seed 0
 ```
 
 ## Honest results
@@ -289,7 +298,61 @@ Honest reading:
    `_sigma` on the Gaussian bumps in `env.py`) is exactly the kind of case where that
    might not hold.
 
+### Does shaping the reward toward steps-to-threshold actually beat maximizing reward?
+
+Every agent above is trained to maximize cumulative measurement reward, then evaluated
+on `steps_to_threshold` as one metric among several — but nothing in that training
+signal ever tells the agent "stop wasting measurements once you're good enough." A more
+direct approach: train on a reward shaped around a fixed, absolute pass/fail spec bar
+instead — a small constant `-0.02` cost per measurement (every measurement consumes real
+tester time, whether or not it moves the needle) plus a one-time `+1.0` bonus the first
+time a (noisy) reading crosses `spec_threshold=0.85`. `--compare-threshold-shaping`
+trains a tabular Q-learning agent this way (`run_episode_shaped` in `agents.py`) and
+compares it against the standard reward-maximizing agent on identical held-out units,
+same training budget (seed 0, 20×20 grid, 40-measurement budget, 100 held-out units):
+
+| strategy | mean best true reward | success rate | mean steps to threshold |
+| --- | ---: | ---: | ---: |
+| q_learning_reward_max | 0.875 | 67% | 4.8 |
+| q_learning_threshold_seeking | 0.321 | 2% | 0.5 |
+
+That is not the result the shaping was designed to produce, and it's worth being honest
+about rather than quietly dropping the experiment:
+
+1. **The direct objective loses badly at equal budget.** Shaping reward around the exact
+   metric being optimized for sounds like it should help, not hurt — but it turned this
+   from a *dense* reward problem (every step's noisy measurement is informative about
+   direction, which is what lets 300 episodes train a usable 20×20 tabular Q-table at
+   all) into a *sparse* one (a single bonus, reachable only ~45% of the time during
+   training, is nearly all the training signal there is). Tabular Q-learning has no way
+   to back-propagate a rare, delayed reward across a 2,000-cell table from 300 episodes
+   — a textbook credit-assignment problem, reproduced here rather than assumed.
+2. **This is a sample-efficiency effect, not a stuck or broken signal.** Training the
+   same shaped agent for 3,000 episodes instead of 300 (10x the budget, same everything
+   else) raises its success rate from 2% to 15% and its mean reward from 0.32 to 0.54 —
+   moving in the right direction, monotonically, exactly as the sparse-reward diagnosis
+   predicts, while the dense-reward baseline's success rate is already flat at
+   67-70% by 300 episodes and gains nothing from the extra budget. The gap narrows with
+   more data; it does not vanish within a budget anyone would consider practical here.
+3. **The honest takeaway inverts the naive intuition.** For this environment, a reward
+   that's already dense and merely *correlated* with the deployment metric is a far
+   better training signal, at any realistic budget, than a sparse reward shaped to match
+   that metric exactly. "Shape the reward toward what you actually care about" is
+   reasonable general RL advice, but it is not free — it traded away the one thing (a
+   dense, every-step signal) that made 300-episode tabular Q-learning work in the first
+   place, and nothing in this repo's earlier experiments would have surfaced that
+   trade-off without actually running it.
+
 ## Status / next steps
+
+Implemented: `run_episode_shaped` / `train_threshold_seeking_agent` /
+`--compare-threshold-shaping`, training a Q-learning agent on a reward shaped directly
+around measurements-to-spec instead of raw measurement magnitude — the exact open thread
+this README used to flag ("steps-to-threshold is now reported but not yet used as an
+optimization target"). See "Does shaping the reward toward steps-to-threshold actually
+beat maximizing reward?" above — the honest answer is "no, it loses badly at this
+environment's training budget, for a specific and verified reason (sparse vs. dense
+reward), not because the idea itself was unreasonable."
 
 Implemented: `LinearFAQAgent`, a linear function approximator over RBF features, as the
 next step this README used to call for ("a continuous calibration space would need function
@@ -319,17 +382,22 @@ landscape's scale it wasn't large enough to make the cheaper two-sweep approxima
 misleading; the joint optimum is within noise of pasting the two 1D optima together, not
 meaningfully better."
 
-Remaining open threads: steps-to-threshold is now reported but not yet used as an
-optimization target (agents are still trained to maximize reward, not to minimize
-measurements-to-acceptable). Pinning down the plateau's true peak precisely (both within a
-single sweep axis and across the joint grid) would need roughly 4x today's seed count per
-point (variance shrinks with the square root of seed count, and the CIs above need to
-roughly halve to separate the top few cells) — a reasonable next run if the exact values
-ever mattered more than "somewhere in a broad, boring middle range, not at the extremes."
-The interaction the joint sweep did find (wide RBFs hurting more as center count grows) was
-only tested at one grid resolution (levels=150); whether it gets stronger at even finer
-resolutions, or whether a sharper reward landscape (narrower `_sigma` in `env.py`) makes the
-sequential-1D approximation break down for real, are both untested.
+Remaining open threads: the threshold-shaping result above raises its own follow-up —
+would a *denser* shaped reward (e.g. a small per-step bonus proportional to noisy reading,
+on top of the one-time spec-crossing bonus, rather than a pure sparse bonus) close the gap
+with the reward-maximizing baseline, or would `LinearFAQAgent`'s generalization across
+nearby cells make the sparse signal viable at a much smaller sample-count penalty than the
+tabular agent pays here? Neither is tested; both are natural next experiments given that
+this repo already has both pieces (`run_episode_shaped` and `LinearFAQAgent`) built.
+Pinning down the plateau's true peak precisely (both within a single sweep axis and across
+the joint grid) would need roughly 4x today's seed count per point (variance shrinks with
+the square root of seed count, and the CIs above need to roughly halve to separate the top
+few cells) — a reasonable next run if the exact values ever mattered more than "somewhere
+in a broad, boring middle range, not at the extremes." The interaction the joint sweep did
+find (wide RBFs hurting more as center count grows) was only tested at one grid resolution
+(levels=150); whether it gets stronger at even finer resolutions, or whether a sharper
+reward landscape (narrower `_sigma` in `env.py`) makes the sequential-1D approximation
+break down for real, are both untested.
 
 ## License
 

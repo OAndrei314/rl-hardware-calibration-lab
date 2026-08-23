@@ -11,6 +11,7 @@ from .experiment import (
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
+    run_threshold_shaping_comparison,
     train_qlearning_agent,
 )
 
@@ -107,7 +108,65 @@ def main(argv: list[str] | None = None) -> int:
             "hyperparameters that the separate 1D sweeps can't see"
         ),
     )
+    parser.add_argument(
+        "--compare-threshold-shaping",
+        action="store_true",
+        help=(
+            "instead of the other modes, train a second Q-learning agent whose "
+            "reward is shaped to directly minimize steps-to-spec-threshold, and "
+            "compare it against the standard reward-maximizing agent on identical "
+            "held-out units"
+        ),
+    )
+    parser.add_argument(
+        "--spec-threshold",
+        type=float,
+        default=0.85,
+        help="absolute pass/fail true-reward bar used by --compare-threshold-shaping",
+    )
+    parser.add_argument(
+        "--step-cost",
+        type=float,
+        default=0.02,
+        help="per-measurement cost in the shaped training reward for --compare-threshold-shaping",
+    )
+    parser.add_argument(
+        "--threshold-bonus",
+        type=float,
+        default=1.0,
+        help="one-time reward for first crossing --spec-threshold in shaped training",
+    )
     args = parser.parse_args(argv)
+
+    if args.compare_threshold_shaping:
+        print(
+            f"Training reward-maximizing vs. threshold-seeking Q-learning agents "
+            f"(spec_threshold={args.spec_threshold}, step_cost={args.step_cost}, "
+            f"bonus={args.threshold_bonus}) on {args.train_episodes} simulated units..."
+        )
+        print()
+        results = run_threshold_shaping_comparison(
+            levels=args.levels,
+            train_episodes=args.train_episodes,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            seed=args.seed,
+            spec_threshold=args.spec_threshold,
+            step_cost=args.step_cost,
+            bonus=args.threshold_bonus,
+        )
+        print(
+            f"{'strategy':<28} {'mean best true reward':<25} {'success':<10} "
+            f"{'steps<thr':<12} {'effort':<10}"
+        )
+        for r in results:
+            print(
+                f"{r.agent_name:<28} {r.mean:<25.4f} {r.success_rate:<10.1%} "
+                f"{r.mean_steps_to_threshold:<12.2f} {r.mean_control_effort:<10.2f}"
+            )
+        return 0
 
     if args.sweep_joint_at_levels is not None:
         print(
