@@ -15,6 +15,7 @@ from .agents import (
     RandomSearchAgent,
     run_episode,
     run_episode_metrics,
+    run_episode_shaped,
 )
 from .env import CalibrationEnv
 
@@ -106,6 +107,93 @@ def train_function_approx_agent(
         )
         run_episode(env, agent, learn=True)
     return agent
+
+
+def train_threshold_seeking_agent(
+    levels: int,
+    train_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+    spec_threshold: float = 0.85,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+) -> QLearningAgent:
+    """Trains a tabular Q-learning agent with `run_episode_shaped` instead of
+    `run_episode` -- same architecture and hyperparameters as `train_qlearning_agent`,
+    but the training signal directly rewards reaching `spec_threshold` in as few
+    measurements as possible, rather than maximizing raw measurement reward.
+    """
+    agent = QLearningAgent(levels=levels, rng=np.random.default_rng(seed + 1))
+    for i in range(train_episodes):
+        env = CalibrationEnv(
+            levels=levels,
+            max_steps=max_steps,
+            noise_std=noise_std,
+            unit_variation=unit_variation,
+            seed=seed + i,
+        )
+        run_episode_shaped(
+            env, agent, spec_threshold=spec_threshold, step_cost=step_cost,
+            bonus=bonus, learn=True,
+        )
+    return agent
+
+
+def run_threshold_shaping_comparison(
+    levels: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+    spec_threshold: float = 0.85,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+) -> list[ExperimentResult]:
+    """Trains the standard reward-maximizing Q-learning agent and the
+    threshold-seeking one on an identical fixed budget (same levels, episodes, noise,
+    unit variation, seed), then evaluates BOTH fresh on the same held-out units,
+    scored against the same fixed, absolute `spec_threshold` used during shaped
+    training. Evaluation uses `run_episode_shaped(..., learn=False)` rather than
+    `run_episode_metrics`'s `threshold_fraction`, since that parameter is relative to
+    each unit's own hidden optimum, not an absolute spec bar -- the two happen to be
+    numerically close in this environment (`optimum_true_reward()` sits within about
+    4% of 1.0 for every unit), but conflating them would silently give the wrong
+    metric on a landscape where that coincidence didn't hold.
+
+    This directly answers the open question the reward-maximizing baseline could not:
+    does training toward "minimize measurements to reach spec" actually reach spec
+    faster than training toward "maximize the reward signal," or does the correlation
+    between the two objectives already do that job well enough on its own?
+    """
+    reward_max = train_qlearning_agent(
+        levels, train_episodes, max_steps, noise_std, unit_variation, seed
+    )
+    reward_max.eval_mode()
+    threshold_seeking = train_threshold_seeking_agent(
+        levels, train_episodes, max_steps, noise_std, unit_variation, seed,
+        spec_threshold=spec_threshold, step_cost=step_cost, bonus=bonus,
+    )
+    threshold_seeking.eval_mode()
+
+    results = {"q_learning_reward_max": [], "q_learning_threshold_seeking": []}
+    for i in range(eval_episodes):
+        env_seed = seed + 30_000 + i  # disjoint from every other seed range in this module
+
+        env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=env_seed)
+        results["q_learning_reward_max"].append(
+            run_episode_shaped(env, reward_max, spec_threshold=spec_threshold, learn=False)
+        )
+
+        env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=env_seed)
+        results["q_learning_threshold_seeking"].append(
+            run_episode_shaped(env, threshold_seeking, spec_threshold=spec_threshold, learn=False)
+        )
+
+    return [ExperimentResult(name, rewards) for name, rewards in results.items()]
 
 
 def run_resolution_comparison(

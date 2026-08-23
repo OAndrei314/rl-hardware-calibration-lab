@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from hw_validation_sim.agents import (
     HillClimbAgent,
@@ -6,8 +7,24 @@ from hw_validation_sim.agents import (
     QLearningAgent,
     run_episode,
     run_episode_metrics,
+    run_episode_shaped,
 )
 from hw_validation_sim.env import CalibrationEnv
+
+
+class _RecordingAgent:
+    """Always takes a fixed action; logs every reward `observe()` receives, so tests
+    can inspect the exact shaped-reward sequence without depending on Q-learning."""
+
+    def __init__(self, fixed_action: int = 0):
+        self.fixed_action = fixed_action
+        self.rewards: list[float] = []
+
+    def act(self, obs):
+        return self.fixed_action
+
+    def observe(self, obs, action, reward, next_obs, done) -> None:
+        self.rewards.append(reward)
 
 
 def test_hill_climb_reverts_after_a_worse_reading():
@@ -90,3 +107,41 @@ def test_run_episode_metrics_include_effort_and_threshold():
     assert metrics.steps_to_threshold is not None
     assert metrics.control_effort <= 20
     assert metrics.boundary_hits >= 0
+
+
+def test_run_episode_shaped_gives_the_bonus_exactly_once():
+    """With noise_std=0 (noisy reward == true reward, deterministic) and a fixed
+    "always move +x" agent starting left of the global optimum, the episode must
+    cross a low spec_threshold on its very first step and never re-cross it (the
+    bonus is one-time by design). Every other step should be pure -step_cost."""
+    env = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    agent = _RecordingAgent(fixed_action=0)  # action 0 == "x+"
+
+    metrics = run_episode_shaped(env, agent, spec_threshold=0.2, step_cost=0.02, bonus=1.0, learn=True)
+
+    assert len(agent.rewards) == 10
+    bonus_indices = [i for i, r in enumerate(agent.rewards) if r > 0]
+    assert len(bonus_indices) == 1
+    assert agent.rewards[bonus_indices[0]] == pytest.approx(1.0 - 0.02)
+    other_rewards = [r for i, r in enumerate(agent.rewards) if i != bonus_indices[0]]
+    assert all(r == pytest.approx(-0.02) for r in other_rewards)
+    assert metrics.steps_to_threshold == bonus_indices[0] + 1  # env.steps is 1-indexed
+
+
+def test_run_episode_shaped_never_reaches_an_impossible_threshold():
+    env = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    agent = _RecordingAgent(fixed_action=0)
+
+    metrics = run_episode_shaped(env, agent, spec_threshold=5.0, step_cost=0.02, bonus=1.0, learn=True)
+
+    assert metrics.steps_to_threshold is None
+    assert all(r == pytest.approx(-0.02) for r in agent.rewards)
+
+
+def test_run_episode_shaped_skips_agent_updates_when_learn_is_false():
+    env = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    agent = _RecordingAgent(fixed_action=0)
+
+    run_episode_shaped(env, agent, spec_threshold=0.2, step_cost=0.02, bonus=1.0, learn=False)
+
+    assert agent.rewards == []
