@@ -8,6 +8,7 @@ from .experiment import (
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
+    run_dense_shaping_sweep,
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
@@ -136,7 +137,59 @@ def main(argv: list[str] | None = None) -> int:
         default=1.0,
         help="one-time reward for first crossing --spec-threshold in shaped training",
     )
+    parser.add_argument(
+        "--sweep-dense-shaping-at-levels",
+        type=int,
+        default=None,
+        metavar="LEVELS",
+        help=(
+            "instead of the other modes, sweep the threshold-seeking agent's "
+            "dense_scale (a per-step reward proportional to the noisy measurement, "
+            "added on top of the sparse spec-crossing bonus) at this grid "
+            "resolution, averaging each value over --sweep-seeds independent "
+            "training seeds, alongside a reward_max reference row on the same seeds"
+        ),
+    )
+    parser.add_argument(
+        "--dense-scales",
+        type=float,
+        nargs="+",
+        default=[0.0, 0.02, 0.05, 0.1, 0.2, 0.5],
+        metavar="SCALE",
+        help="candidate dense_scale values for --sweep-dense-shaping-at-levels",
+    )
     args = parser.parse_args(argv)
+
+    if args.sweep_dense_shaping_at_levels is not None:
+        print(
+            f"Sweeping threshold-seeking dense_scale {args.dense_scales} at levels="
+            f"{args.sweep_dense_shaping_at_levels}, {args.sweep_seeds} training seeds "
+            f"each, fixed {args.train_episodes}-episode training budget "
+            f"(spec_threshold={args.spec_threshold}, step_cost={args.step_cost}, "
+            f"bonus={args.threshold_bonus})..."
+        )
+        print()
+        points = run_dense_shaping_sweep(
+            levels=args.sweep_dense_shaping_at_levels,
+            dense_scales=args.dense_scales,
+            n_seeds=args.sweep_seeds,
+            train_episodes=args.train_episodes,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            base_seed=args.seed,
+            spec_threshold=args.spec_threshold,
+            step_cost=args.step_cost,
+            bonus=args.threshold_bonus,
+        )
+        print(f"{'label':<20}{'mean success':<16}{'95% CI +/-':<14}{'mean reward':<14}")
+        for p in points:
+            print(
+                f"{p.label:<20}{p.mean_success_rate:<16.1%}"
+                f"{p.success_ci95_halfwidth:<14.3f}{p.mean_reward:<14.4f}"
+            )
+        return 0
 
     if args.compare_threshold_shaping:
         print(

@@ -145,3 +145,46 @@ def test_run_episode_shaped_skips_agent_updates_when_learn_is_false():
     run_episode_shaped(env, agent, spec_threshold=0.2, step_cost=0.02, bonus=1.0, learn=False)
 
     assert agent.rewards == []
+
+
+def test_run_episode_shaped_default_dense_scale_is_unchanged_from_pure_sparse():
+    """dense_scale defaults to 0.0, which must add exactly nothing -- every reward
+    already established by test_run_episode_shaped_gives_the_bonus_exactly_once
+    must be untouched when dense_scale is passed explicitly as 0.0."""
+    env_a = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    env_b = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    agent_default = _RecordingAgent(fixed_action=0)
+    agent_explicit_zero = _RecordingAgent(fixed_action=0)
+
+    run_episode_shaped(env_a, agent_default, spec_threshold=0.2, step_cost=0.02, bonus=1.0)
+    run_episode_shaped(
+        env_b, agent_explicit_zero, spec_threshold=0.2, step_cost=0.02, bonus=1.0, dense_scale=0.0
+    )
+
+    assert agent_default.rewards == agent_explicit_zero.rewards
+
+
+def test_run_episode_shaped_dense_scale_adds_a_reward_proportional_to_the_reading():
+    """With noise_std=0 (noisy reward == true reward) and dense_scale=0.5, every
+    step's shaped reward should equal the pure-sparse reward (bonus-or-nothing minus
+    step_cost) plus 0.5 * that step's true reward -- checked directly against a
+    dense_scale=0.0 run of the identical trajectory, not just "reward went up"."""
+    agent_sparse = _RecordingAgent(fixed_action=0)
+    env_sparse = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    run_episode_shaped(env_sparse, agent_sparse, spec_threshold=5.0, step_cost=0.02, bonus=1.0)
+
+    agent_dense = _RecordingAgent(fixed_action=0)
+    env_dense = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    run_episode_shaped(
+        env_dense, agent_dense, spec_threshold=5.0, step_cost=0.02, bonus=1.0, dense_scale=0.5,
+    )
+
+    # spec_threshold=5.0 is unreachable, so both trajectories are identical (same
+    # fixed action, same deterministic env) and every sparse reward is exactly
+    # -step_cost -- isolating the dense term as the only difference between them.
+    dense_minus_sparse = [d - s for d, s in zip(agent_dense.rewards, agent_sparse.rewards)]
+    # Recover each step's true reward from the deterministic env by replaying it.
+    replay_env = CalibrationEnv(levels=20, max_steps=10, noise_std=0.0, unit_variation=0.0, seed=0)
+    replay_env.reset()
+    true_rewards = [replay_env.step(0).true_reward for _ in range(10)]
+    assert dense_minus_sparse == pytest.approx([0.5 * r for r in true_rewards])

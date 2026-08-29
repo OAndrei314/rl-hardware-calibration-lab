@@ -119,11 +119,16 @@ def train_threshold_seeking_agent(
     spec_threshold: float = 0.85,
     step_cost: float = 0.02,
     bonus: float = 1.0,
+    dense_scale: float = 0.0,
 ) -> QLearningAgent:
     """Trains a tabular Q-learning agent with `run_episode_shaped` instead of
     `run_episode` -- same architecture and hyperparameters as `train_qlearning_agent`,
     but the training signal directly rewards reaching `spec_threshold` in as few
     measurements as possible, rather than maximizing raw measurement reward.
+
+    `dense_scale=0.0` (the default) reproduces the original pure-sparse shaping
+    exactly; see `run_episode_shaped` and `run_dense_shaping_sweep` for the
+    per-step-proportional-bonus variant this parameter enables.
     """
     agent = QLearningAgent(levels=levels, rng=np.random.default_rng(seed + 1))
     for i in range(train_episodes):
@@ -136,7 +141,7 @@ def train_threshold_seeking_agent(
         )
         run_episode_shaped(
             env, agent, spec_threshold=spec_threshold, step_cost=step_cost,
-            bonus=bonus, learn=True,
+            bonus=bonus, dense_scale=dense_scale, learn=True,
         )
     return agent
 
@@ -194,6 +199,150 @@ def run_threshold_shaping_comparison(
         )
 
     return [ExperimentResult(name, rewards) for name, rewards in results.items()]
+
+
+@dataclass
+class DenseShapingPoint:
+    """One `dense_scale` value's results for the threshold-seeking agent, aggregated
+    across independent training seeds (not a single-seed point estimate) -- same
+    paired-seed design as `run_center_sweep`/`run_sigma_sweep`/`run_joint_sweep`.
+
+    Unlike those sweeps, this one tracks **success rate** per seed alongside mean
+    reward: the open question `run_threshold_shaping_comparison` raised is whether a
+    denser reward closes the *success-rate* gap to the reward-maximizing baseline,
+    and mean reward alone can look deceptively close while success rate stays far
+    apart (a big true-reward improvement on the units that still fail to reach spec
+    is not the same thing as more units reaching spec).
+
+    `dense_scale=None` marks the reward-maximizing reference row -- trained with the
+    ordinary `train_qlearning_agent`/`run_episode` path, not the shaped runner --
+    included so the table this feeds has the baseline it's being compared against
+    computed on the exact same seed stream, not pasted in from a different run.
+    """
+
+    label: str
+    dense_scale: float | None
+    seed_success_rates: list[float]
+    seed_mean_rewards: list[float]
+
+    @property
+    def mean_success_rate(self) -> float:
+        return float(np.mean(self.seed_success_rates))
+
+    @property
+    def success_std(self) -> float:
+        """Sample std (ddof=1) of the per-seed success rates."""
+        return float(np.std(self.seed_success_rates, ddof=1)) if len(self.seed_success_rates) > 1 else 0.0
+
+    @property
+    def success_ci95_halfwidth(self) -> float:
+        """Half-width of a normal-approximation 95% CI on the across-seed mean
+        success rate. NaN with fewer than 2 seeds, since a CI is meaningless
+        without variance."""
+        n = len(self.seed_success_rates)
+        if n < 2:
+            return float("nan")
+        return float(1.96 * self.success_std / np.sqrt(n))
+
+    @property
+    def mean_reward(self) -> float:
+        return float(np.mean(self.seed_mean_rewards))
+
+
+def _threshold_seeking_seed_stats(
+    agent: QLearningAgent,
+    levels: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+    spec_threshold: float,
+) -> tuple[float, float]:
+    """Evaluate one trained agent on `eval_episodes` held-out units (the same
+    `seed + 20_000 + i` convention every other sweep in this module uses) and
+    return (success_rate, mean_best_true_reward)."""
+    agent.eval_mode()
+    metrics = []
+    for i in range(eval_episodes):
+        env = CalibrationEnv(levels, max_steps, noise_std, unit_variation, seed=seed + 20_000 + i)
+        metrics.append(
+            run_episode_shaped(env, agent, spec_threshold=spec_threshold, learn=False)
+        )
+    success_rate = float(np.mean([m.steps_to_threshold is not None for m in metrics]))
+    mean_reward = float(np.mean([m.best_true_reward for m in metrics]))
+    return success_rate, mean_reward
+
+
+def run_dense_shaping_sweep(
+    levels: int,
+    dense_scales: list[float],
+    n_seeds: int,
+    train_episodes: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    base_seed: int,
+    spec_threshold: float = 0.85,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+    include_reward_max: bool = True,
+) -> list[DenseShapingPoint]:
+    """At a fixed grid resolution and training budget, train the threshold-seeking
+    agent at each candidate `dense_scale` (a per-step reward term proportional to the
+    noisy measurement, on top of the existing sparse spec-crossing bonus) across
+    `n_seeds` independent training seeds -- same `base_seed + s * 1000` seed stream
+    convention as `run_center_sweep`/`run_sigma_sweep`, so this is a paired
+    comparison across `dense_scale` values, not confounded by which value happened
+    to draw luckier training units.
+
+    `dense_scale=0.0` reproduces `run_threshold_shaping_comparison`'s pure-sparse
+    threshold-seeking agent exactly (same seeds, same shaping, same eval convention)
+    -- a built-in sanity check that this is a genuinely new sweep, not a
+    reimplementation that happens to disagree with the number already in the README.
+
+    When `include_reward_max` (the default), a `dense_scale=None` reference row is
+    prepended: the ordinary reward-maximizing agent, trained and evaluated on the
+    exact same seed stream, so the sweep table includes the baseline it's actually
+    being compared against rather than requiring the reader to cross-reference a
+    different run.
+    """
+    points = []
+    if include_reward_max:
+        seed_success, seed_reward = [], []
+        for s in range(n_seeds):
+            seed = base_seed + s * 1000
+            agent = train_qlearning_agent(
+                levels, train_episodes, max_steps, noise_std, unit_variation, seed
+            )
+            success_rate, mean_reward = _threshold_seeking_seed_stats(
+                agent, levels, eval_episodes, max_steps, noise_std, unit_variation,
+                seed, spec_threshold,
+            )
+            seed_success.append(success_rate)
+            seed_reward.append(mean_reward)
+        points.append(DenseShapingPoint("reward_max", None, seed_success, seed_reward))
+
+    for dense_scale in dense_scales:
+        seed_success, seed_reward = [], []
+        for s in range(n_seeds):
+            seed = base_seed + s * 1000
+            agent = train_threshold_seeking_agent(
+                levels, train_episodes, max_steps, noise_std, unit_variation, seed,
+                spec_threshold=spec_threshold, step_cost=step_cost, bonus=bonus,
+                dense_scale=dense_scale,
+            )
+            success_rate, mean_reward = _threshold_seeking_seed_stats(
+                agent, levels, eval_episodes, max_steps, noise_std, unit_variation,
+                seed, spec_threshold,
+            )
+            seed_success.append(success_rate)
+            seed_reward.append(mean_reward)
+        points.append(
+            DenseShapingPoint(f"dense_scale={dense_scale}", dense_scale, seed_success, seed_reward)
+        )
+    return points
 
 
 def run_resolution_comparison(
