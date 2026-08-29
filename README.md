@@ -100,6 +100,13 @@ python -m hw_validation_sim.cli --sweep-joint-at-levels 150 \
 # identical training/eval budget:
 python -m hw_validation_sim.cli --compare-threshold-shaping \
   --train-episodes 300 --eval-episodes 100 --seed 0
+
+# Sweep how much per-step "dense" signal (proportional to the noisy measurement)
+# the threshold-seeking agent needs on top of its sparse spec-crossing bonus to
+# close the success-rate gap to the reward-maximizing baseline, averaged over
+# multiple training seeds:
+python -m hw_validation_sim.cli --sweep-dense-shaping-at-levels 20 \
+  --dense-scales 0.0 0.02 0.05 0.1 0.2 0.5 1.0 2.0 --sweep-seeds 24 --seed 0
 ```
 
 ## Honest results
@@ -343,6 +350,63 @@ about rather than quietly dropping the experiment:
    place, and nothing in this repo's earlier experiments would have surfaced that
    trade-off without actually running it.
 
+### Does a denser shaped reward close that gap?
+
+The threshold-shaping result above raised its own follow-up, left as an explicitly
+untested open thread: would giving the threshold-seeking agent a *dense* per-step signal
+too — not just the sparse spec-crossing bonus — recover the sample efficiency it lost?
+`run_episode_shaped` now takes a `dense_scale` parameter: on top of the existing
+`-step_cost` per measurement and one-time `+bonus` for crossing `spec_threshold`, it adds
+`dense_scale * noisy_reward` to every step's shaped reward (`dense_scale=0.0` reproduces
+the pure-sparse behavior above exactly — this is a strict superset, not a rewrite).
+`--sweep-dense-shaping-at-levels` sweeps `dense_scale` at a fixed grid resolution and
+training budget, each value averaged over independent training seeds, alongside a
+`reward_max` reference row trained and evaluated on the identical seed stream. At
+levels=20, 300 training episodes, 80 held-out eval units, averaged over 24 independent
+training seeds:
+
+| dense_scale | mean success rate | 95% CI half-width | mean best true reward |
+| ---: | ---: | ---: | ---: |
+| (reward_max reference) | 46.6% | ±6.3pp | 0.746 |
+| 0.0 (pure sparse) | 11.9% | ±5.3pp | 0.437 |
+| 0.02 | 23.1% | ±8.9pp | 0.539 |
+| 0.05 | 38.2% | ±9.4pp | 0.665 |
+| 0.1 | 39.1% | ±7.3pp | 0.697 |
+| 0.2 | 40.5% | ±9.7pp | 0.679 |
+| 0.5 | **49.3%** | ±7.3pp | **0.756** |
+| 1.0 | 43.7% | ±7.4pp | 0.722 |
+| 2.0 | 41.6% | ±8.5pp | 0.704 |
+
+Three things worth being honest about:
+
+1. **The denser reward does close the gap, and fast.** A tiny `dense_scale=0.02` already
+   more than doubles success rate over pure-sparse shaping (11.9% → 23.1%); by
+   `dense_scale=0.05`–`0.1` the threshold-seeking agent is statistically indistinguishable
+   from the reward-maximizing baseline (their 95% CIs overlap almost completely). This
+   directly confirms the credit-assignment diagnosis in the section above: it was the
+   *sparsity* of the training signal that hurt, not the "optimize for the actual deployment
+   metric" framing itself — as soon as the agent gets a dense, every-step signal again
+   (even a small one, mixed with the still-sparse crossing bonus), tabular Q-learning
+   trains about as well as it does on the fully dense reward-maximizing objective.
+2. **There's a broad plateau around `dense_scale≈0.5`, not a sharp optimum.** 0.5 pooled
+   ahead of every other value tested, including the reward_max reference itself, but its CI
+   (42.0%–56.6%) overlaps 0.1 through 2.0 almost entirely — consistent with this repo's
+   other sweeps (RBF center count, RBF width), a wide noisy middle band rather than a
+   precise peak. Going past 0.5 to 1.0 and 2.0 shows a real, if noisy, decline — an
+   over-large dense term increasingly drowns out the sparse bonus's steps-to-threshold
+   incentive, pulling the agent back toward "maximize reward" rather than "reach spec fast."
+3. **The single-seed reward_max number reported above (67% success) was an optimistic
+   draw, not a stable estimate — and it's worth saying so plainly rather than letting a
+   good-looking number stand uninvestigated.** Averaged over 24 independent training seeds
+   here, reward_max's true success rate is 46.6% ± 6.3pp — seed 0 alone, used throughout the
+   section above, happened to land on the better side of a wide distribution. This doesn't
+   change any of that section's *qualitative* conclusions (sparse-vs-dense, sample
+   efficiency, the credit-assignment story) since those were internally consistent
+   single-seed comparisons, but it does mean the specific "67%" and "2%" numbers should be
+   read as one seed's outcome, not the environment's typical behavior — exactly the kind of
+   single-seed trap this repo's own center-count sweep flagged earlier ("a run that reported
+   just one seed's answer would have been reporting noise").
+
 ## Status / next steps
 
 Implemented: `run_episode_shaped` / `train_threshold_seeking_agent` /
@@ -382,22 +446,31 @@ landscape's scale it wasn't large enough to make the cheaper two-sweep approxima
 misleading; the joint optimum is within noise of pasting the two 1D optima together, not
 meaningfully better."
 
-Remaining open threads: the threshold-shaping result above raises its own follow-up —
-would a *denser* shaped reward (e.g. a small per-step bonus proportional to noisy reading,
-on top of the one-time spec-crossing bonus, rather than a pure sparse bonus) close the gap
-with the reward-maximizing baseline, or would `LinearFAQAgent`'s generalization across
-nearby cells make the sparse signal viable at a much smaller sample-count penalty than the
-tabular agent pays here? Neither is tested; both are natural next experiments given that
-this repo already has both pieces (`run_episode_shaped` and `LinearFAQAgent`) built.
-Pinning down the plateau's true peak precisely (both within a single sweep axis and across
-the joint grid) would need roughly 4x today's seed count per point (variance shrinks with
-the square root of seed count, and the CIs above need to roughly halve to separate the top
-few cells) — a reasonable next run if the exact values ever mattered more than "somewhere
-in a broad, boring middle range, not at the extremes." The interaction the joint sweep did
-find (wide RBFs hurting more as center count grows) was only tested at one grid resolution
-(levels=150); whether it gets stronger at even finer resolutions, or whether a sharper
-reward landscape (narrower `_sigma` in `env.py`) makes the sequential-1D approximation
-break down for real, are both untested.
+Implemented: `dense_scale` on `run_episode_shaped` / `train_threshold_seeking_agent`, and
+`run_dense_shaping_sweep` / `--sweep-dense-shaping-at-levels`, the denser-shaped-reward
+follow-up this README used to flag as an untested next experiment. See "Does a denser
+shaped reward close that gap?" above — the honest answer is "yes, and with a surprisingly
+small amount of dense signal (`dense_scale=0.05`–`0.1` already closes it), though the
+same investigation also caught that the section above's single-seed reward_max baseline
+(67% success) was an optimistic draw of a noisier true distribution (46.6% ± 6.3pp over 24
+seeds) — worth correcting rather than leaving the better-looking number standing."
+
+Remaining open threads: would `LinearFAQAgent`'s generalization across nearby grid cells
+make the *pure-sparse* threshold-seeking signal (`dense_scale=0.0`) viable at a much
+smaller sample-count penalty than the tabular agent pays here, now that dense shaping has
+already closed the gap a different way? Untested — the dense-reward result above answers
+"how do you fix sparse-reward credit assignment with more signal," not "does a
+generalizing function approximator need less signal to begin with," and both repairs being
+available now makes the comparison a natural next experiment. Pinning down the RBF
+center-count/width plateau's true peak precisely (both within a single sweep axis and
+across the joint grid) would need roughly 4x today's seed count per point (variance
+shrinks with the square root of seed count, and the CIs above need to roughly halve to
+separate the top few cells) — a reasonable next run if the exact values ever mattered more
+than "somewhere in a broad, boring middle range, not at the extremes." The interaction the
+joint sweep did find (wide RBFs hurting more as center count grows) was only tested at one
+grid resolution (levels=150); whether it gets stronger at even finer resolutions, or
+whether a sharper reward landscape (narrower `_sigma` in `env.py`) makes the sequential-1D
+approximation break down for real, are both untested.
 
 ## License
 

@@ -236,6 +236,7 @@ def run_episode_shaped(
     spec_threshold: float,
     step_cost: float = 0.02,
     bonus: float = 1.0,
+    dense_scale: float = 0.0,
     learn: bool = True,
 ) -> EpisodeMetrics:
     """Like `run_episode_metrics`, but the reward handed to `agent.observe()` during
@@ -255,6 +256,15 @@ def run_episode_shaped(
     when the bar is crossed, the per-step cost is a wash between two training runs
     of equal length -- the only real lever left to increase discounted return is
     reaching the bonus sooner, which is exactly "minimize steps-to-threshold."
+
+    `dense_scale` (0.0 by default, reproducing the original pure-sparse shaping
+    exactly) adds `dense_scale * noisy_reward` to every step's shaped reward. This is
+    still a sparse-*bonus* runner at its core -- the spec-crossing bonus and its
+    "stop wasting measurements" incentive are unchanged -- but a nonzero
+    `dense_scale` also gives the agent a per-step signal correlated with how close it
+    is to the optimum, the same dense signal the reward-maximizing baseline gets "for
+    free," to test whether that's what was missing rather than the direct spec-bar
+    framing itself.
 
     `spec_threshold` is a fixed absolute bar (not `threshold_fraction * this
     episode's hidden optimum`, unlike `run_episode_metrics`) -- realistic for a
@@ -282,7 +292,7 @@ def run_episode_shaped(
             boundary_hits += 1
         just_reached = (not reached) and (result.noisy_reward >= spec_threshold)
         reached = reached or just_reached
-        shaped_reward = (bonus if just_reached else 0.0) - step_cost
+        shaped_reward = (bonus if just_reached else 0.0) - step_cost + dense_scale * result.noisy_reward
         if learn:
             agent.observe(obs, action, shaped_reward, result.obs, result.done)
         obs = result.obs

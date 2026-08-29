@@ -3,14 +3,17 @@ import math
 import numpy as np
 import pytest
 
-from hw_validation_sim.agents import LinearFAQAgent
+from hw_validation_sim.agents import LinearFAQAgent, run_episode_shaped
+from hw_validation_sim.env import CalibrationEnv
 from hw_validation_sim.experiment import (
     CenterSweepPoint,
+    DenseShapingPoint,
     JointSweepPoint,
     SigmaSweepPoint,
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
+    run_dense_shaping_sweep,
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
@@ -337,3 +340,115 @@ def test_joint_sweep_agrees_with_the_1d_sweeps_at_matching_combinations():
     sigma_points = run_sigma_sweep(n_centers_per_dim=6, sigma_scales=[0.5, 1.5], **common)
     joint_vs_sigma = run_joint_sweep(center_counts=[6], sigma_scales=[0.5, 1.5], **common)
     assert [p.seed_means for p in joint_vs_sigma] == [p.seed_means for p in sigma_points]
+
+
+def test_dense_shaping_point_stats_are_computed_correctly():
+    """Pure statistics check, no simulation -- same mean/std/CI formula as the
+    center/sigma/joint sweep points, applied to success rate instead of reward."""
+    point = DenseShapingPoint(
+        label="dense_scale=0.1", dense_scale=0.1, seed_success_rates=[0.2, 0.3, 0.4, 0.5],
+        seed_mean_rewards=[0.5, 0.6, 0.7, 0.8],
+    )
+    assert point.mean_success_rate == pytest.approx(0.35)
+    assert point.success_std == pytest.approx(0.12909944, abs=1e-6)  # sample std, ddof=1
+    assert point.success_ci95_halfwidth == pytest.approx(1.96 * point.success_std / 2, abs=1e-6)
+    assert point.mean_reward == pytest.approx(0.65)
+
+
+def test_dense_shaping_point_ci_is_nan_with_fewer_than_two_seeds():
+    point = DenseShapingPoint(
+        label="dense_scale=0.1", dense_scale=0.1, seed_success_rates=[0.5], seed_mean_rewards=[0.6],
+    )
+    assert point.success_std == 0.0
+    assert math.isnan(point.success_ci95_halfwidth)
+
+
+def test_dense_shaping_sweep_zero_scale_reproduces_pure_sparse_shaping():
+    """dense_scale=0.0 must add nothing to the shaped reward, so the sweep's
+    dense_scale=0.0 point must exactly match training/evaluating
+    train_threshold_seeking_agent directly with no dense_scale argument at all --
+    not merely a similar number, bit-for-bit identical, since both paths share the
+    same seed and the same (deterministic, given the seed) training/eval loop."""
+    [point] = run_dense_shaping_sweep(
+        levels=12, dense_scales=[0.0], n_seeds=1, train_episodes=20, eval_episodes=8,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=3,
+        include_reward_max=False,
+    )
+
+    direct_agent = train_threshold_seeking_agent(
+        levels=12, train_episodes=20, max_steps=15, noise_std=0.05, unit_variation=1.0,
+        seed=3, spec_threshold=0.85,
+    )
+    direct_agent.eval_mode()
+    direct_metrics = [
+        run_episode_shaped(
+            CalibrationEnv(12, 15, 0.05, 1.0, seed=3 + 20_000 + i),
+            direct_agent, spec_threshold=0.85, learn=False,
+        )
+        for i in range(8)
+    ]
+    expected_success = float(np.mean([m.steps_to_threshold is not None for m in direct_metrics]))
+    expected_reward = float(np.mean([m.best_true_reward for m in direct_metrics]))
+
+    assert point.dense_scale == 0.0
+    assert point.seed_success_rates == [expected_success]
+    assert point.seed_mean_rewards == pytest.approx([expected_reward])
+
+
+def test_dense_shaping_sweep_includes_reward_max_reference_by_default():
+    points = run_dense_shaping_sweep(
+        levels=12, dense_scales=[0.1], n_seeds=2, train_episodes=20, eval_episodes=8,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=0,
+    )
+    assert [p.label for p in points] == ["reward_max", "dense_scale=0.1"]
+    assert points[0].dense_scale is None
+    assert points[1].dense_scale == 0.1
+    assert all(len(p.seed_success_rates) == 2 for p in points)
+
+
+def test_dense_shaping_sweep_can_omit_reward_max_reference():
+    points = run_dense_shaping_sweep(
+        levels=12, dense_scales=[0.1, 0.3], n_seeds=2, train_episodes=20, eval_episodes=8,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=0,
+        include_reward_max=False,
+    )
+    assert [p.label for p in points] == ["dense_scale=0.1", "dense_scale=0.3"]
+
+
+def test_dense_shaping_sweep_is_deterministic_given_the_same_seeds():
+    """No hidden global randomness, mirroring every other sweep's determinism
+    guarantee in this module."""
+    kwargs = dict(
+        levels=12, dense_scales=[0.2], n_seeds=3, train_episodes=20, eval_episodes=8,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=1,
+    )
+    first = run_dense_shaping_sweep(**kwargs)
+    second = run_dense_shaping_sweep(**kwargs)
+    assert first[-1].seed_success_rates == second[-1].seed_success_rates
+    assert first[-1].seed_mean_rewards == second[-1].seed_mean_rewards
+
+
+def test_denser_shaped_reward_substantially_closes_the_success_rate_gap():
+    """Honest, reproducible finding: run_threshold_shaping_comparison already
+    established that a purely sparse spec-crossing bonus loses badly to the
+    reward-maximizing baseline at this environment's training budget (see
+    test_threshold_shaping_underperforms_dense_reward_at_equal_budget). Adding a
+    per-step reward term proportional to the noisy measurement -- the exact
+    follow-up the README's "Status / next steps" section flagged as untested --
+    should recover most of that gap. Regression-pinned to observed behavior at
+    this seed/budget (dense_scale=0.0 success ~6%, dense_scale=0.5 success
+    ~48%); margin is loose, not exact equality."""
+    points = {
+        p.label: p
+        for p in run_dense_shaping_sweep(
+            levels=20, dense_scales=[0.0, 0.5], n_seeds=4, train_episodes=300,
+            eval_episodes=30, max_steps=40, noise_std=0.05, unit_variation=1.5,
+            base_seed=0, include_reward_max=False,
+        )
+    }
+    assert points["dense_scale=0.0"].mean_success_rate < 0.15
+    assert points["dense_scale=0.5"].mean_success_rate > 0.35
+    assert (
+        points["dense_scale=0.5"].mean_success_rate
+        > points["dense_scale=0.0"].mean_success_rate + 0.25
+    )
