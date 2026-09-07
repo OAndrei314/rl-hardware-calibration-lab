@@ -345,6 +345,150 @@ def run_dense_shaping_sweep(
     return points
 
 
+def train_threshold_seeking_fa_agent(
+    levels: int,
+    train_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    seed: int,
+    spec_threshold: float = 0.85,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+    dense_scale: float = 0.0,
+    n_centers_per_dim: int = 14,
+    sigma_scale: float = 0.6,
+) -> LinearFAQAgent:
+    """Same training loop as `train_threshold_seeking_agent`, but for `LinearFAQAgent`
+    instead of tabular `QLearningAgent`. Exists so
+    `run_sparse_threshold_sample_efficiency_comparison` can ask whether RBF
+    generalization changes the severe sample penalty pure-sparse shaping
+    (`dense_scale=0.0`) pays a tabular Q-table, or whether that penalty is a property
+    of the sparse reward itself rather than of the tabular representation.
+    """
+    agent = LinearFAQAgent(
+        levels=levels,
+        rng=np.random.default_rng(seed + 2),
+        n_centers_per_dim=n_centers_per_dim,
+        sigma_scale=sigma_scale,
+    )
+    for i in range(train_episodes):
+        env = CalibrationEnv(
+            levels=levels,
+            max_steps=max_steps,
+            noise_std=noise_std,
+            unit_variation=unit_variation,
+            seed=seed + i,
+        )
+        run_episode_shaped(
+            env, agent, spec_threshold=spec_threshold, step_cost=step_cost,
+            bonus=bonus, dense_scale=dense_scale, learn=True,
+        )
+    return agent
+
+
+@dataclass
+class SparseThresholdBudgetPoint:
+    """One (agent architecture, training-episode budget) combination's results under
+    PURE SPARSE threshold-seeking shaping (`dense_scale=0.0` fixed throughout),
+    aggregated across independent training seeds -- not a single-seed point estimate.
+
+    Answers the open question this README's "Status / next steps" section raised
+    after the dense-shaping sweep: does `LinearFAQAgent`'s cross-cell generalization
+    let pure-sparse shaping become viable at a much smaller training-episode budget
+    than the tabular agent needs, now that `dense_scale` has already closed the same
+    gap a different way?
+    """
+
+    agent_type: str  # "tabular" or "linear_fa"
+    train_episodes: int
+    seed_success_rates: list[float]
+    seed_mean_rewards: list[float]
+
+    @property
+    def mean_success_rate(self) -> float:
+        return float(np.mean(self.seed_success_rates))
+
+    @property
+    def success_std(self) -> float:
+        """Sample std (ddof=1) of the per-seed success rates."""
+        return float(np.std(self.seed_success_rates, ddof=1)) if len(self.seed_success_rates) > 1 else 0.0
+
+    @property
+    def success_ci95_halfwidth(self) -> float:
+        """Half-width of a normal-approximation 95% CI on the across-seed mean
+        success rate. NaN with fewer than 2 seeds, since a CI is meaningless
+        without variance."""
+        n = len(self.seed_success_rates)
+        if n < 2:
+            return float("nan")
+        return float(1.96 * self.success_std / np.sqrt(n))
+
+    @property
+    def mean_reward(self) -> float:
+        return float(np.mean(self.seed_mean_rewards))
+
+
+def run_sparse_threshold_sample_efficiency_comparison(
+    levels: int,
+    train_episode_budgets: list[int],
+    n_seeds: int,
+    eval_episodes: int,
+    max_steps: int,
+    noise_std: float,
+    unit_variation: float,
+    base_seed: int,
+    spec_threshold: float = 0.85,
+    step_cost: float = 0.02,
+    bonus: float = 1.0,
+    n_centers_per_dim: int = 14,
+    sigma_scale: float = 0.6,
+) -> list[SparseThresholdBudgetPoint]:
+    """At each candidate training-episode budget, train BOTH a tabular and a
+    linear-FA threshold-seeking agent under identical pure-sparse shaping
+    (`dense_scale=0.0` -- the exact regime `run_threshold_shaping_comparison` found
+    the tabular agent losing badly at), each averaged over `n_seeds` independent
+    training seeds using the same `base_seed + s * 1000` seed-stream convention as
+    every other sweep in this module, so both architectures see identical
+    training/eval units at a given seed and budget -- a paired comparison, not
+    confounded by which one got a luckier draw.
+
+    Default `n_centers_per_dim=14, sigma_scale=0.6` reuse this README's own
+    joint-sweep result for the best-measured RBF configuration, rather than
+    introducing a new hand-picked value here.
+
+    Returns points in `(budget, agent_type)` order for every budget in
+    `train_episode_budgets`, `"tabular"` before `"linear_fa"` within each budget.
+    """
+    points = []
+    for train_episodes in train_episode_budgets:
+        for agent_type in ("tabular", "linear_fa"):
+            seed_success, seed_reward = [], []
+            for s in range(n_seeds):
+                seed = base_seed + s * 1000
+                if agent_type == "tabular":
+                    agent = train_threshold_seeking_agent(
+                        levels, train_episodes, max_steps, noise_std, unit_variation,
+                        seed, spec_threshold=spec_threshold, step_cost=step_cost, bonus=bonus,
+                    )
+                else:
+                    agent = train_threshold_seeking_fa_agent(
+                        levels, train_episodes, max_steps, noise_std, unit_variation,
+                        seed, spec_threshold=spec_threshold, step_cost=step_cost, bonus=bonus,
+                        n_centers_per_dim=n_centers_per_dim, sigma_scale=sigma_scale,
+                    )
+                success_rate, mean_reward = _threshold_seeking_seed_stats(
+                    agent, levels, eval_episodes, max_steps, noise_std, unit_variation,
+                    seed, spec_threshold,
+                )
+                seed_success.append(success_rate)
+                seed_reward.append(mean_reward)
+            points.append(
+                SparseThresholdBudgetPoint(agent_type, train_episodes, seed_success, seed_reward)
+            )
+    return points
+
+
 def run_resolution_comparison(
     levels: int,
     train_episodes: int,

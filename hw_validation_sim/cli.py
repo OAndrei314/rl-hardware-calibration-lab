@@ -12,6 +12,7 @@ from .experiment import (
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
+    run_sparse_threshold_sample_efficiency_comparison,
     run_threshold_shaping_comparison,
     train_qlearning_agent,
 )
@@ -158,7 +159,52 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SCALE",
         help="candidate dense_scale values for --sweep-dense-shaping-at-levels",
     )
+    parser.add_argument(
+        "--compare-sparse-threshold-budgets",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="EPISODES",
+        help=(
+            "instead of the other modes, train both a tabular and a linear-FA "
+            "threshold-seeking agent under identical pure-sparse shaping "
+            "(dense_scale=0.0) at each given training-episode budget, averaging "
+            "each (budget, architecture) combination over --sweep-seeds "
+            "independent training seeds -- tests whether RBF generalization "
+            "reduces the sample penalty pure-sparse shaping pays a tabular Q-table"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.compare_sparse_threshold_budgets is not None:
+        print(
+            f"Comparing tabular vs. linear-FA threshold-seeking agents under pure-"
+            f"sparse shaping (dense_scale=0.0) across training budgets "
+            f"{args.compare_sparse_threshold_budgets}, {args.sweep_seeds} training "
+            f"seeds each (spec_threshold={args.spec_threshold}, "
+            f"step_cost={args.step_cost}, bonus={args.threshold_bonus})..."
+        )
+        print()
+        points = run_sparse_threshold_sample_efficiency_comparison(
+            levels=args.levels,
+            train_episode_budgets=args.compare_sparse_threshold_budgets,
+            n_seeds=args.sweep_seeds,
+            eval_episodes=args.eval_episodes,
+            max_steps=args.max_steps,
+            noise_std=args.noise_std,
+            unit_variation=args.unit_variation,
+            base_seed=args.seed,
+            spec_threshold=args.spec_threshold,
+            step_cost=args.step_cost,
+            bonus=args.threshold_bonus,
+        )
+        print(f"{'train_episodes':<16}{'agent_type':<12}{'mean success':<16}{'95% CI +/-':<14}{'mean reward':<14}")
+        for p in points:
+            print(
+                f"{p.train_episodes:<16}{p.agent_type:<12}{p.mean_success_rate:<16.1%}"
+                f"{p.success_ci95_halfwidth:<14.3f}{p.mean_reward:<14.4f}"
+            )
+        return 0
 
     if args.sweep_dense_shaping_at_levels is not None:
         print(

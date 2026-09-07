@@ -64,10 +64,14 @@ the decoy optimum tends to be — and apply that on a brand-new unit it's never 
   training seeds with a 95% CI — a paired design that reuses the same seed stream across
   values), `run_joint_sweep` (center count and width swept *together*, over every
   combination in a grid, to check for an interaction the two independent 1D sweeps can't
-  see), and `run_threshold_shaping_comparison` (a second tabular Q-learning agent trained
+  see), `run_threshold_shaping_comparison` (a second tabular Q-learning agent trained
   with `agents.run_episode_shaped`, whose reward is shaped to directly minimize
   measurements-to-spec rather than to maximize the raw measurement, compared against the
-  standard agent on identical held-out units and an identical training budget).
+  standard agent on identical held-out units and an identical training budget), and
+  `run_sparse_threshold_sample_efficiency_comparison` (tabular vs. linear-FA
+  threshold-seeking agents, both trained under identical pure-sparse shaping, across a
+  range of training-episode budgets — tests whether RBF generalization reduces the
+  sample penalty pure-sparse shaping pays a tabular Q-table).
 
 ## Quickstart
 
@@ -107,6 +111,13 @@ python -m hw_validation_sim.cli --compare-threshold-shaping \
 # multiple training seeds:
 python -m hw_validation_sim.cli --sweep-dense-shaping-at-levels 20 \
   --dense-scales 0.0 0.02 0.05 0.1 0.2 0.5 1.0 2.0 --sweep-seeds 24 --seed 0
+
+# Under pure-sparse threshold shaping (no dense signal at all), compare tabular vs.
+# linear-FA threshold-seeking agents across a range of training-episode budgets --
+# tests whether RBF generalization closes the sparse-shaping gap on its own, at any
+# budget, without adding the dense_scale term above:
+python -m hw_validation_sim.cli --compare-sparse-threshold-budgets 100 300 1000 3000 6000 \
+  --sweep-seeds 8 --seed 0
 ```
 
 ## Honest results
@@ -407,6 +418,54 @@ Three things worth being honest about:
    single-seed trap this repo's own center-count sweep flagged earlier ("a run that reported
    just one seed's answer would have been reporting noise").
 
+### Does switching to function approximation rescue pure-sparse shaping on its own?
+
+The dense-shaping sweep above fixed the sample-efficiency gap by adding a dense per-step
+signal to the shaped reward — but that leaves an open question this README used to flag
+explicitly: is the tabular agent's severe penalty under *pure*-sparse shaping
+(`dense_scale=0.0`) specific to the tabular representation, and would `LinearFAQAgent`'s
+cross-cell generalization close some of that gap on its own, at a smaller training budget,
+without needing the `dense_scale` fix at all?
+`run_sparse_threshold_sample_efficiency_comparison` trains both a tabular and a linear-FA
+threshold-seeking agent under identical pure-sparse shaping, at each of several
+training-episode budgets, each averaged over 8 independent training seeds (`levels=20`,
+`n_centers_per_dim=14, sigma_scale=0.6` — this repo's own previously-measured best joint
+RBF configuration, not a new hand-picked value):
+
+| train_episodes | tabular success | tabular 95% CI | tabular mean reward | linear-FA success | linear-FA 95% CI | linear-FA mean reward |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 20.6% | ±9.4pp | 0.556 | 24.1% | ±13.2pp | 0.593 |
+| 300 | 7.5% | ±7.1pp | 0.370 | 26.4% | ±14.8pp | 0.563 |
+| 1,000 | 27.0% | ±18.7pp | 0.543 | 22.4% | ±9.0pp | 0.581 |
+| 3,000 | 22.2% | ±13.6pp | 0.536 | 24.3% | ±14.4pp | 0.548 |
+| 6,000 | 24.9% | ±16.1pp | 0.558 | 22.4% | ±11.1pp | 0.572 |
+
+This is not the clean win the "generalization should help" intuition predicts, and it is
+worth reporting plainly instead of quietly dropping the negative result:
+
+1. **The two representations are statistically indistinguishable at every budget tested.**
+   Every pair of CIs above overlaps almost completely, and neither agent shows a consistent
+   upward trend across a 60x range of training episodes (100 to 6,000) — contrast this with
+   the dense-shaping sweep, where a small `dense_scale` produced a fast, monotonic, clearly
+   resolved improvement. Switching representation, on its own, does not reproduce that fix.
+2. **This has a mechanistic explanation, not just a null result.** `run_resolution_comparison`
+   already established what linear-FA is good for: at a fine grid, the tabular Q-table has
+   more cells than the training budget can visit even once, and RBF generalization shares an
+   update across nearby unvisited cells — a *spatial coverage* problem. Pure-sparse shaping's
+   penalty is a different problem entirely: a rare, delayed spec-crossing bonus is hard for
+   *any* one-step TD update to back-propagate across a long episode, regardless of how densely
+   the state space itself is covered — a *temporal credit-assignment* problem. Generalizing
+   across grid cells doesn't help an agent that visits every relevant cell already (at
+   `levels=20`, the tabular table gets plenty of visits per cell in 100+ episodes) but still
+   can't tell, from a single sparse terminal-ish bonus, which of its many actions actually
+   caused it.
+3. **The practical takeaway sharpens, rather than contradicts, the dense-shaping result
+   above.** If the bottleneck were representational, switching to `LinearFAQAgent` would have
+   been a free win with no reward-shaping design work required. It isn't — the fix that
+   actually worked (a small `dense_scale` on top of the sparse bonus) is a fix to the
+   *training signal*, not the *function class*, and this experiment is the reason to believe
+   that distinction is real rather than assumed.
+
 ## Status / next steps
 
 Implemented: `run_episode_shaped` / `train_threshold_seeking_agent` /
@@ -455,13 +514,21 @@ same investigation also caught that the section above's single-seed reward_max b
 (67% success) was an optimistic draw of a noisier true distribution (46.6% ± 6.3pp over 24
 seeds) — worth correcting rather than leaving the better-looking number standing."
 
-Remaining open threads: would `LinearFAQAgent`'s generalization across nearby grid cells
-make the *pure-sparse* threshold-seeking signal (`dense_scale=0.0`) viable at a much
-smaller sample-count penalty than the tabular agent pays here, now that dense shaping has
-already closed the gap a different way? Untested — the dense-reward result above answers
-"how do you fix sparse-reward credit assignment with more signal," not "does a
-generalizing function approximator need less signal to begin with," and both repairs being
-available now makes the comparison a natural next experiment. Pinning down the RBF
+Implemented: `train_threshold_seeking_fa_agent` and
+`run_sparse_threshold_sample_efficiency_comparison` /
+`--compare-sparse-threshold-budgets`, comparing tabular vs. linear-FA threshold-seeking
+agents under pure-sparse shaping across a range of training budgets — the exact open
+thread this README used to flag ("would `LinearFAQAgent`'s generalization... make the
+pure-sparse threshold-seeking signal viable at a much smaller sample-count penalty than
+the tabular agent pays"). See "Does switching to function approximation rescue
+pure-sparse shaping on its own?" above — the honest answer is "no, the two
+representations are statistically indistinguishable at every budget from 100 to 6,000
+episodes," with a mechanistic reason: linear-FA fixes a *spatial coverage* problem (too
+few visits per grid cell), while pure-sparse shaping's penalty is a *temporal
+credit-assignment* problem (a rare, delayed bonus is hard for one-step TD to
+back-propagate), and generalizing across grid cells doesn't touch that bottleneck.
+
+Remaining open threads: pinning down the RBF
 center-count/width plateau's true peak precisely (both within a single sweep axis and
 across the joint grid) would need roughly 4x today's seed count per point (variance
 shrinks with the square root of seed count, and the CIs above need to roughly halve to
