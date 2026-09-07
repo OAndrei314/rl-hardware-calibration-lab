@@ -10,6 +10,7 @@ from hw_validation_sim.experiment import (
     DenseShapingPoint,
     JointSweepPoint,
     SigmaSweepPoint,
+    SparseThresholdBudgetPoint,
     evaluate_agents,
     render_markdown_report,
     run_center_sweep,
@@ -17,9 +18,11 @@ from hw_validation_sim.experiment import (
     run_joint_sweep,
     run_resolution_comparison,
     run_sigma_sweep,
+    run_sparse_threshold_sample_efficiency_comparison,
     run_threshold_shaping_comparison,
     train_qlearning_agent,
     train_threshold_seeking_agent,
+    train_threshold_seeking_fa_agent,
 )
 
 
@@ -452,3 +455,104 @@ def test_denser_shaped_reward_substantially_closes_the_success_rate_gap():
         points["dense_scale=0.5"].mean_success_rate
         > points["dense_scale=0.0"].mean_success_rate + 0.25
     )
+
+
+def test_sparse_threshold_budget_point_stats_are_computed_correctly():
+    """Pure statistics check, no simulation -- same mean/std/CI formula as every
+    other seed-aggregated point dataclass in this module."""
+    point = SparseThresholdBudgetPoint(
+        agent_type="linear_fa", train_episodes=300,
+        seed_success_rates=[0.2, 0.3, 0.4, 0.5], seed_mean_rewards=[0.5, 0.6, 0.7, 0.8],
+    )
+    assert point.mean_success_rate == pytest.approx(0.35)
+    assert point.success_std == pytest.approx(0.12909944, abs=1e-6)
+    assert point.success_ci95_halfwidth == pytest.approx(1.96 * point.success_std / 2, abs=1e-6)
+    assert point.mean_reward == pytest.approx(0.65)
+
+
+def test_sparse_threshold_budget_point_ci_is_nan_with_fewer_than_two_seeds():
+    point = SparseThresholdBudgetPoint(
+        agent_type="tabular", train_episodes=300,
+        seed_success_rates=[0.5], seed_mean_rewards=[0.6],
+    )
+    assert point.success_std == 0.0
+    assert math.isnan(point.success_ci95_halfwidth)
+
+
+def test_train_threshold_seeking_fa_agent_dense_scale_zero_matches_pure_sparse_shaping():
+    """dense_scale=0.0 (the default) must reproduce the exact pure-sparse shaped
+    reward `run_episode_shaped` gives by default -- same guarantee
+    `test_dense_shaping_sweep_zero_scale_reproduces_pure_sparse_shaping` already
+    checks for the tabular agent, mirrored here for the linear-FA path."""
+    kwargs = dict(
+        levels=12, train_episodes=20, max_steps=15, noise_std=0.05,
+        unit_variation=1.0, seed=3, spec_threshold=0.5,
+    )
+    default_agent = train_threshold_seeking_fa_agent(**kwargs)
+    explicit_agent = train_threshold_seeking_fa_agent(**kwargs, dense_scale=0.0)
+    assert np.array_equal(default_agent.weights, explicit_agent.weights)
+
+
+def test_sparse_threshold_budget_comparison_returns_tabular_then_fa_per_budget():
+    points = run_sparse_threshold_sample_efficiency_comparison(
+        levels=12, train_episode_budgets=[20, 40], n_seeds=2, eval_episodes=6,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=0,
+    )
+    assert [(p.train_episodes, p.agent_type) for p in points] == [
+        (20, "tabular"), (20, "linear_fa"), (40, "tabular"), (40, "linear_fa"),
+    ]
+    assert all(len(p.seed_success_rates) == 2 for p in points)
+    assert all(len(p.seed_mean_rewards) == 2 for p in points)
+
+
+def test_sparse_threshold_budget_comparison_is_deterministic_given_the_same_seeds():
+    """No hidden global randomness, mirroring every other sweep's determinism
+    guarantee in this module."""
+    kwargs = dict(
+        levels=12, train_episode_budgets=[30], n_seeds=3, eval_episodes=6,
+        max_steps=15, noise_std=0.05, unit_variation=1.0, base_seed=1,
+    )
+    first = run_sparse_threshold_sample_efficiency_comparison(**kwargs)
+    second = run_sparse_threshold_sample_efficiency_comparison(**kwargs)
+    assert [p.seed_success_rates for p in first] == [p.seed_success_rates for p in second]
+    assert [p.seed_mean_rewards for p in first] == [p.seed_mean_rewards for p in second]
+
+
+def test_sparse_threshold_tabular_and_fa_stay_indistinguishable_and_below_the_dense_fix():
+    """Honest, reproducible finding: unlike run_dense_shaping_sweep's dense_scale fix
+    (success rate ~48% at dense_scale=0.5, see test_denser_shaped_reward_...),
+    switching from tabular to linear-FA representation under PURE-SPARSE shaping
+    does not rescue the credit-assignment problem on its own. At both budgets tested
+    here, the two representations' 95% CIs overlap (can't resolve a difference at
+    this seed count) and both stay well below the dense fix's success rate.
+    Regression-pinned to observed behavior at this seed/budget; margins are loose,
+    not exact equality."""
+    points = {
+        (p.train_episodes, p.agent_type): p
+        for p in run_sparse_threshold_sample_efficiency_comparison(
+            levels=20, train_episode_budgets=[300, 3000], n_seeds=4, eval_episodes=30,
+            max_steps=40, noise_std=0.05, unit_variation=1.5, base_seed=0,
+        )
+    }
+    for train_episodes in (300, 3000):
+        tabular = points[(train_episodes, "tabular")]
+        fa = points[(train_episodes, "linear_fa")]
+        assert tabular.mean_success_rate < 0.40
+        assert fa.mean_success_rate < 0.40
+        tabular_hi = tabular.mean_success_rate + tabular.success_ci95_halfwidth
+        fa_lo = fa.mean_success_rate - fa.success_ci95_halfwidth
+        assert fa_lo < tabular_hi, f"budget={train_episodes}: CIs unexpectedly separated"
+
+
+def test_sparse_threshold_budget_comparison_reuses_the_same_seed_stream_across_seed_counts():
+    """Paired-comparison design, same guarantee as every other sweep in this module:
+    the first N seeds of a short run must match the first N seeds of a longer run at
+    the same budget and agent type."""
+    common = dict(
+        levels=12, train_episode_budgets=[30], eval_episodes=6, max_steps=15,
+        noise_std=0.05, unit_variation=1.0, base_seed=2,
+    )
+    short = run_sparse_threshold_sample_efficiency_comparison(n_seeds=2, **common)
+    long = run_sparse_threshold_sample_efficiency_comparison(n_seeds=4, **common)
+    for s, l in zip(short, long):
+        assert l.seed_success_rates[:2] == s.seed_success_rates
